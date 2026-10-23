@@ -180,6 +180,31 @@ fn install_dir_arg() -> Option<String> {
     Some(format!("/D={}", exe.parent()?.display()))
 }
 
+/// Removes the installers earlier updates left behind.
+///
+/// The updater extracts each downloaded installer into a folder of its own under the temporary
+/// directory and never returns to delete it: six such folders were found on one machine after a
+/// month of updates, the newest still holding its 54 MB installer. Startup is the right moment,
+/// not the end of an update, because it is the first moment the previous version's installer is
+/// certainly finished — it is what launched this process.
+#[cfg(windows)]
+fn remove_updater_leftovers() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("BEASTUBE-") && name.contains("-updater-") && entry.path().is_dir() {
+            // A folder whose installer is somehow still running refuses deletion; that is fine,
+            // it is picked up next time.
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Builds and runs the desktop application.
 ///
 /// # Panics
@@ -191,6 +216,10 @@ pub fn run() {
     // configuration during `build`, so this is the last moment at which its command line can still
     // be decided by a preference rather than fixed in a file.
     gpu::apply_browser_arguments();
+
+    // Off the startup path: a listing of the temporary directory that nothing waits for.
+    #[cfg(windows)]
+    std::thread::spawn(remove_updater_leftovers);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

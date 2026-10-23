@@ -81,6 +81,17 @@ pub(crate) struct AppState {
     tool_search_dirs: Vec<PathBuf>,
     /// When the state was constructed, for the uptime reading on the diagnostics screen.
     started_at: std::time::Instant,
+    /// The most recent reading of the provider's category hubs, with when it was taken.
+    ///
+    /// Identical for everyone and several requests to assemble, so it is read once and shared by
+    /// every home feed for a while rather than fetched again on each refresh. See
+    /// `commands::fresh_videos`.
+    pub(crate) fresh: parking_lot::Mutex<
+        Option<(
+            std::time::Instant,
+            Vec<beastube_core::model::video::VideoSummary>,
+        )>,
+    >,
 }
 
 /// Why startup failed.
@@ -249,6 +260,7 @@ impl AppState {
             download_cache_dir,
             tool_search_dirs,
             started_at: std::time::Instant::now(),
+            fresh: parking_lot::Mutex::new(None),
         })
     }
 

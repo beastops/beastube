@@ -18,6 +18,15 @@
  * it when it lands. There is never a moment with nothing to show, and there is never a stale feed
  * that stays stale.
  *
+ * 4. **Launching showed a skeleton.** Everything above held within a session and nothing across
+ *    one: the first screen of every launch waited the full round trip for a feed, which is the
+ *    one wait the site itself never makes anyone sit through — it paints what it showed last time
+ *    and swaps in the new feed underneath. The last good value of each feed is therefore kept in
+ *    the webview's storage as well, read back the first time anything asks, and treated exactly
+ *    like a value from earlier in the session: shown at once, and replaced the moment the fetch
+ *    that starts alongside it lands. Storage is a convenience, never a requirement — a webview
+ *    without it, or with it full, behaves as before.
+ *
  * The `revision` is how a caller says "not the one you have". It comes from `useFeedStore` and is
  * bumped by clicking a feed's nav entry, so the same request key with a new revision means fetch
  * again rather than serve the cached answer.
@@ -65,14 +74,75 @@ interface Entry<T> {
 // which no single type parameter can express.
 const entries = new Map<string, Entry<unknown>>();
 
+/** Prefix of the storage keys holding each feed's last good value across launches. */
+const STORAGE_PREFIX = 'beastube.feed.';
+
+/** Keys whose stored copy has been looked for already, so storage is read once per key, not per render. */
+const hydrated = new Set<string>();
+
+/** The copy of a feed kept from an earlier launch, if storage has one that still parses. */
+function readStored(id: string): unknown {
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + id);
+    return raw === null ? undefined : (JSON.parse(raw) as unknown);
+  } catch {
+    // Storage disabled, or a value this build no longer understands. Either way: fetch as usual.
+    return undefined;
+  }
+}
+
+/** Keeps a feed for the next launch. Failure is silent — the in-memory copy still serves this one. */
+function writeStored(id: string, value: unknown): void {
+  try {
+    localStorage.setItem(STORAGE_PREFIX + id, JSON.stringify(value));
+  } catch {
+    // Quota, or storage disabled.
+  }
+}
+
+/** Forgets every stored feed. */
+function dropStored(): void {
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(STORAGE_PREFIX)) localStorage.removeItem(key);
+    }
+  } catch {
+    // Storage disabled; nothing to forget.
+  }
+}
+
+/**
+ * The entry for a key, brought in from storage the first time it is asked for.
+ *
+ * A stored value arrives already expired — `startedAt` of zero — so the first request for the key
+ * still goes out; what changes is that there is something to show while it does.
+ */
+function slot<T>(id: string): Entry<T> | undefined {
+  const inMemory = entries.get(id) as Entry<T> | undefined;
+  if (inMemory || hydrated.has(id)) return inMemory;
+  hydrated.add(id);
+  // Our own earlier write, under our own key: the shape is the one this module stored.
+  const stored = readStored(id) as T | undefined;
+  if (stored === undefined) return undefined;
+  const entry: Entry<T> = {
+    value: stored,
+    promise: Promise.resolve(stored),
+    revision: -1,
+    startedAt: 0,
+  };
+  entries.set(id, entry);
+  return entry;
+}
+
 /**
  * The newest value fetched for a key, without fetching.
  *
  * Read during render to fill a view before its own request has settled. Returns `undefined` only
- * when nothing has ever been fetched for that key — the first launch, or after a data clear.
+ * when nothing has ever been fetched for that key on any launch — a fresh install, or after a data
+ * clear.
  */
 export function lastFeed<T>(key: FeedKey<T>): T | undefined {
-  return (entries.get(key.id) as Entry<T> | undefined)?.value;
+  return slot<T>(key.id)?.value;
 }
 
 /**
@@ -101,7 +171,7 @@ function feed<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const now = Date.now();
-  const cached = entries.get(key.id) as Entry<T> | undefined;
+  const cached = slot<T>(key.id);
 
   let promise: Promise<T> | undefined;
   if (cached) {
@@ -115,6 +185,7 @@ function feed<T>(
         commit(key.id, request, (entry) => {
           entry.value = value;
         });
+        writeStored(key.id, value);
         return value;
       })
       .catch((cause: unknown) => {
@@ -207,7 +278,9 @@ export function preloadFeeds(shortsLimits: readonly number[], recommendedLimit: 
   });
 }
 
-/** Drops everything. Used when the user clears data, so nothing survives that should not. */
+/** Drops everything, stored copies included. Used when the user clears data, so nothing survives that should not. */
 export function clearFeedCache(): void {
   entries.clear();
+  hydrated.clear();
+  dropStored();
 }

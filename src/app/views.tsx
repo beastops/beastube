@@ -317,9 +317,9 @@ function HomeView(): ReactNode {
   // Falls back to whatever was last fetched, which is what makes arriving here instant. The shell
   // keys the routed view on the route name, so coming back from a video remounts this component
   // with no state at all — without the cache behind it, every return to Home is a skeleton.
-  const recommendedAll =
-    (recommended.data ?? lastFeed<RecommendedFeed>(recommendedKey(RECOMMENDED_COUNT)))?.videos ??
-    [];
+  const recommendedFeed =
+    recommended.data ?? lastFeed<RecommendedFeed>(recommendedKey(RECOMMENDED_COUNT));
+  const recommendedAll = recommendedFeed?.videos ?? [];
   const suggestions = recommendedAll.filter((video) => !isPortraitVideo(video));
 
   // The shelf carries both what the shorts query returned and any portrait items lifted out of the
@@ -354,7 +354,7 @@ function HomeView(): ReactNode {
   // Named from what the videos were actually derived from, so a feed of broad topics is not
   // presented as personalization that did not happen.
   const feedHeading: TranslationKey =
-    recommended.data?.source === 'discover' ? 'home.discover' : 'home.recommended';
+    recommendedFeed?.source === 'discover' ? 'home.discover' : 'home.recommended';
 
   const empty =
     continueWatching.length === 0 && recentlyWatched.length === 0 && suggestions.length === 0;

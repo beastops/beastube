@@ -45,7 +45,8 @@ dubbed audio tracks are selectable where a video has them.
 <img src="docs/screenshots/watch.png" width="100%" alt="The watch page">
 
 **Explore and search.** Seven category hubs — Music, Gaming, Live, News, Sport, Learning, Fashion &
-Beauty — reading YouTube's own pages. The home feed is built from the same hubs, newest first.
+Beauty — reading YouTube's own pages. The home feed starts from the same hubs, newest first; once
+you have watched a few things it is built around those, with the hubs woven in.
 
 **Shorts.** A full-height vertical feed with keyboard and wheel navigation.
 

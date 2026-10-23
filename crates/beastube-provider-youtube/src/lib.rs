@@ -138,6 +138,13 @@ impl YouTubeProvider {
             // reports contain raw upstream payloads, which is exactly the kind of content this
             // application does not retain.
             .no_reporter()
+            // One retry, not two. The extractor retries a response it could not parse as though
+            // the connection had failed, pausing a second before the second attempt and three
+            // before the third — but a parse failure is deterministic, and the common one here
+            // (`could not find secondary_info`, on a watch page the site has reshaped) fails the
+            // same way every time. Two retries cost about five seconds per such page and bought
+            // nothing; one still gives a genuinely transient 5xx or 429 a chance to clear.
+            .n_http_retries(1)
             .build()
             .map_err(|error| ProviderError::Transport {
                 detail: error.to_string(),
@@ -161,31 +168,6 @@ impl YouTubeProvider {
         self.client
             .query()
             .visitor_data_opt(self.visitor.current().await)
-    }
-
-    /// Watch-page details rebuilt from the player payload.
-    ///
-    /// The fallback for [`VideoProvider::video`] when the typed watch-page parse fails. Returns
-    /// `None` if the request or the parse also fails, so the caller reports the original error
-    /// rather than a second, less recognisable one.
-    async fn details_via_player(
-        &self,
-        id: &VideoId,
-        cancel: &CancellationToken,
-    ) -> Option<VideoDetails> {
-        let client = self.query().await;
-        let body = serde_json::json!({ "videoId": id.as_str() });
-
-        let json = Self::with_cancellation(cancel, async move {
-            client
-                .raw(rustypipe::client::ClientType::Desktop, "player", &body)
-                .await
-                .map_err(|error| classify(&error, "video_details_player"))
-        })
-        .await
-        .ok()?;
-
-        map::details_from_player(&json, id)
     }
 
     /// One channel tab, read from the raw browse response.
@@ -254,20 +236,14 @@ impl YouTubeProvider {
         })
     }
 
-    /// The video's caption tracks, or an empty list if they cannot be read.
+    /// Everything the player payload contributes to a watch page, or as much of it as could be read.
     ///
-    /// They live on the player response, not the watch page — which is why the capability used to
-    /// say captions were unavailable when they were one request away. Never fails the caller:
-    /// a watch page that loads without a caption list is the behaviour that shipped before, and it
-    /// is a far better outcome than a watch page that does not load.
-    async fn caption_and_audio_tracks(
-        &self,
-        id: &VideoId,
-        cancel: &CancellationToken,
-    ) -> (
-        Vec<beastube_core::model::video::CaptionTrack>,
-        Vec<beastube_core::model::video::AudioTrack>,
-    ) {
+    /// The caption and audio-track lists live on the player response, not the watch page — which
+    /// is why the capability used to say captions were unavailable when they were one request
+    /// away. The details come along for the case where the watch page itself cannot be read; see
+    /// [`VideoProvider::video`]. Never fails the caller: a watch page that loads with empty lists
+    /// is the behaviour that shipped before, and a far better outcome than one that does not load.
+    async fn player_facts(&self, id: &VideoId, cancel: &CancellationToken) -> PlayerFacts {
         let client = self.query().await;
         let owned = id.as_str().to_owned();
 
@@ -281,13 +257,18 @@ impl YouTubeProvider {
         });
 
         match Self::with_cancellation(cancel, request).await {
-            Ok(player) => (
-                map::caption_tracks(player.subtitles.clone()),
-                map::audio_tracks(&player.audio_streams),
-            ),
+            Ok(player) => PlayerFacts {
+                captions: map::caption_tracks(player.subtitles.clone()),
+                audio_tracks: map::audio_tracks(&player.audio_streams),
+                details: map::details_from_player(id, &player.details),
+            },
             Err(error) => {
-                tracing::debug!(video = id.as_str(), %error, "track lists were unavailable");
-                (Vec::new(), Vec::new())
+                tracing::debug!(video = id.as_str(), %error, "the player payload was unavailable");
+                PlayerFacts {
+                    captions: Vec::new(),
+                    audio_tracks: Vec::new(),
+                    details: None,
+                }
             }
         }
     }
@@ -345,6 +326,23 @@ impl YouTubeProvider {
             },
         }
     }
+}
+
+/// How long the watch page is waited for once the player payload has answered.
+///
+/// Measured against the live service: a watch page the extractor can parse arrives within a few
+/// hundred milliseconds of the player, and one it cannot parse never arrives at all — it is
+/// retried, then refused. Long enough that the ordinary case keeps everything the watch page adds;
+/// short enough that the reshaped case opens in about two seconds rather than six.
+const WATCH_PAGE_PATIENCE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// What the player payload contributes to a watch page.
+struct PlayerFacts {
+    captions: Vec<beastube_core::model::video::CaptionTrack>,
+    audio_tracks: Vec<beastube_core::model::video::AudioTrack>,
+    /// The page's details as the player describes them — enough to open the video on when the
+    /// watch page itself cannot be read. `None` when the player could not be read either.
+    details: Option<VideoDetails>,
 }
 
 /// Classifies an extractor error into the provider taxonomy.
@@ -703,44 +701,82 @@ impl VideoProvider for YouTubeProvider {
         id: &VideoId,
         cancel: &CancellationToken,
     ) -> ProviderResult<VideoDetails> {
+        use futures::FutureExt;
+        use futures::future::{Either, select};
+
         let client = self.query().await;
         let owned = id.as_str().to_owned();
 
-        let (watch_page, (captions, audio_tracks)) = futures::join!(
-            Self::with_cancellation(cancel, async move {
-                client
-                    .video_details(owned)
-                    .await
-                    .map_err(|error| classify(&error, "video_details"))
-            }),
-            self.caption_and_audio_tracks(id, cancel),
-        );
+        let watch_page = Self::with_cancellation(cancel, async move {
+            client
+                .video_details(owned)
+                .await
+                .map_err(|error| classify(&error, "video_details"))
+        })
+        .fuse();
+        let player = self.player_facts(id, cancel).fuse();
+        futures::pin_mut!(watch_page, player);
+
+        // The two requests start together, and whichever answers first decides how long the other
+        // is waited for. The watch-page parser treats one absent optional section as fatal — it
+        // reports `could not find secondary_info` and yields nothing — and the extractor then
+        // retries that deterministic failure as though the connection had dropped, so a video
+        // whose page the site has reshaped took six or seven seconds to open instead of one,
+        // measured against the live service. The player payload answers for those same ids in
+        // under a second and carries enough to open the page on, so once it has landed the watch
+        // page gets a short grace period and no more: what it adds beyond that — like count,
+        // subscriber count, chapters — is not worth five seconds of blank page.
+        //
+        // The watch page is only abandoned when the player can stand in for it. If the player
+        // could not be read either, the watch page is all there is and is waited for in full.
+        let (watch_page, player) = match select(watch_page, player).await {
+            Either::Left((watch_page, player)) => (Some(watch_page), player.await),
+            Either::Right((player, mut watch_page)) => {
+                match tokio::time::timeout(WATCH_PAGE_PATIENCE, &mut watch_page).await {
+                    Ok(watch_page) => (Some(watch_page), player),
+                    Err(_elapsed) if player.details.is_some() => (None, player),
+                    Err(_elapsed) => (Some(watch_page.await), player),
+                }
+            }
+        };
+        let PlayerFacts {
+            captions,
+            audio_tracks,
+            details: standby,
+        } = player;
 
         let details = match watch_page {
-            Ok(details) => details,
-            // The watch-page parser treats one absent optional section as fatal — it reports
-            // `could not find secondary_info` and yields nothing — so a video that is perfectly
-            // playable opens on an error page instead. Before giving up, ask the player endpoint,
-            // whose payload is a flat object rather than a tree of renderers and which answers for
-            // ids the watch page refuses. See `map::details_from_player`.
-            //
-            // Only for a response we could not read. `Unavailable` is an answer, not a failure:
-            // the player endpoint still returns metadata for videos that are private, withdrawn or
-            // blocked in the region, so retrying those would replace a truthful "this cannot be
-            // played" with an ordinary-looking watch page for a video that will not play.
-            Err(error @ ProviderError::SchemaDrift { .. }) => {
-                let Some(mut details) = self.details_via_player(id, cancel).await else {
-                    return Err(error);
+            Some(Ok(details)) => details,
+            // Standing in is only for a response that could not be read, or was not waited for.
+            // `Unavailable` is an answer, not a failure: the player endpoint still describes videos
+            // that are private, withdrawn or blocked in the region, so standing in for those would
+            // replace a truthful "this cannot be played" with an ordinary-looking watch page for a
+            // video that will not play.
+            Some(Err(error)) if !matches!(error, ProviderError::SchemaDrift { .. }) => {
+                return Err(error);
+            }
+            refused => {
+                let Some(mut details) = standby else {
+                    return Err(match refused {
+                        Some(Err(error)) => error,
+                        // Not reachable: the watch page is only given up on when the player can
+                        // stand in. Named rather than panicked on, because a watch page is not
+                        // worth taking the application down for.
+                        _ => ProviderError::Transport {
+                            detail: "the watch page was abandoned with nothing to stand in for it"
+                                .to_owned(),
+                        },
+                    });
                 };
                 details.captions = captions;
                 details.audio_tracks = audio_tracks;
                 tracing::debug!(
                     video = id.as_str(),
+                    refused = refused.is_some(),
                     "watch-page details were unreadable; used the player payload"
                 );
                 return Ok(details);
             }
-            Err(error) => return Err(error),
         };
 
         let channel = details.channel;

@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0 the minor number carries
 breaking changes.
 
+## [0.1.8] — 2026-10-23
+
+### Changed
+
+- **The home feed mixes in what is on YouTube now.** With a watch history, the feed was built only
+  from videos related to what you had watched — good at being adjacent to the last thing you saw,
+  and incapable of showing anything new. One column of the category hubs behind Explore now takes
+  its turn among the related lists, so about a fifth of the feed is what is being watched right
+  now rather than more of what you already know. The hubs are read once every ten minutes and
+  shared by every refresh, so the column costs the feed no time: measured, the six hubs take 2.4 s
+  to read against 1.2 s for the related lists, and would otherwise have doubled every refresh.
+
+### Fixed
+
+- **Opening a video the site has reshaped took six seconds.** The watch-page parser refuses a
+  page missing a section it expects, and the extractor then retried that refusal as though the
+  connection had dropped — pausing a second, then three — before the player's own description of
+  the video was asked for instead. Measured at 6.2 to 7.0 seconds per such video, with the player
+  answering in under a second the whole time. The two requests now start together, and once the
+  player has answered the watch page gets a moment longer and no more. Those videos open in 1.7
+  seconds; the ones the parser reads took 0.7 seconds and still do. What a stood-in page lacks is
+  the like count, the subscriber count and the chapters.
+- **The home screen waited for the network on every launch.** Within a session the feed stayed on
+  screen while it refreshed, but a launch started from nothing and sat on a skeleton for the whole
+  round trip. The feed shown last time is now kept and painted at once, then replaced when the new
+  one lands a second or two later — which is what the site itself does. Clearing data in Settings
+  forgets it.
+- **Every update left its installer behind.** The updater extracts each downloaded installer into
+  a folder of its own under the temporary directory and never deleted it: six were found on one
+  machine, the newest still holding its 54 MB installer. They are removed at startup, when the
+  previous version's installer is certainly finished.
+
 ## [0.1.7] — 2026-10-23
 
 ### Fixed

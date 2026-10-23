@@ -1523,8 +1523,12 @@ pub(crate) async fn get_recommended(
     if personalize {
         let seeds = spread_seeds(&history, RECOMMENDATION_SEEDS, variant);
 
+        // The fresh column is fetched alongside the personal lists rather than after them, so it
+        // costs the feed no time of its own.
         if !seeds.is_empty() {
-            let videos = interleave(related_lists(&state, seeds, enough).await, &watched, limit);
+            let (lists, fresh) =
+                tokio::join!(related_lists(&state, seeds, enough), fresh_videos(&state));
+            let videos = blend(lists, fresh, &watched, limit);
             if !videos.is_empty() {
                 return Ok(RecommendedFeed {
                     videos,
@@ -1546,7 +1550,9 @@ pub(crate) async fn get_recommended(
             .collect();
 
         if !queries.is_empty() {
-            let videos = interleave(search_lists(&state, queries, enough).await, &watched, limit);
+            let (lists, fresh) =
+                tokio::join!(search_lists(&state, queries, enough), fresh_videos(&state));
+            let videos = blend(lists, fresh, &watched, limit);
             if !videos.is_empty() {
                 return Ok(RecommendedFeed {
                     videos,
@@ -1561,22 +1567,12 @@ pub(crate) async fn get_recommended(
     // words in `DISCOVERY_TOPICS` — which returns whatever ranks well for them, often years old.
     // The hubs carry videos published minutes ago, which is what "here is what is on YouTube"
     // was always meant to mean.
-    let cancel = CancellationToken::new();
-    if let Ok(page) = state.provider.discovery_feed(None, &cancel).await {
-        let videos: Vec<VideoSummary> = page
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                beastube_core::model::SearchItem::Video(video) => Some(video),
-                _ => None,
-            })
-            .collect();
-        if !videos.is_empty() {
-            return Ok(RecommendedFeed {
-                videos: interleave(vec![videos], &watched, limit),
-                source: RecommendationSource::Discover,
-            });
-        }
+    let fresh = fresh_videos(&state).await;
+    if !fresh.is_empty() {
+        return Ok(RecommendedFeed {
+            videos: interleave(vec![fresh], &watched, limit),
+            source: RecommendationSource::Discover,
+        });
     }
 
     // Only if every hub failed. Searching for evergreen words is a poor feed, but it is a feed,
@@ -1590,6 +1586,69 @@ pub(crate) async fn get_recommended(
 
 /// [`RECOMMENDATION_SEEDS`] as the width the repository takes.
 const RECOMMENDATION_SEEDS_U32: u32 = 4;
+
+/// How long one reading of the category hubs serves home feeds before they are read again.
+///
+/// The hubs are the same for everyone and change by the minute, but a refresh of the home feed is
+/// a request for *different* recommendations, not for newer news: re-reading six hubs on every
+/// refresh cost between two and three seconds each time — measured — for a column the viewer
+/// rarely scrolls far enough to exhaust. Ten minutes keeps the column within the hour the site's
+/// own ordering is built on.
+const FRESH_POOL_TTL: Duration = Duration::from_mins(10);
+
+/// Videos from the provider's category hubs, read at most once per [`FRESH_POOL_TTL`].
+///
+/// This is the fresh side of the home feed. Related lists are drawn from what the viewer has
+/// already watched, which is exactly what makes them good and exactly what keeps them from ever
+/// showing anything new; the site's own home mixes what it knows you like with what is being
+/// watched right now, and so does this — one column of hub videos interleaved with the personal
+/// ones. Empty when the hubs cannot be read, which costs the viewer a column rather than a feed.
+async fn fresh_videos(state: &AppState) -> Vec<VideoSummary> {
+    if let Some((read_at, videos)) = state.fresh.lock().as_ref()
+        && read_at.elapsed() < FRESH_POOL_TTL
+    {
+        return videos.clone();
+    }
+
+    let cancel = CancellationToken::new();
+    let videos = match state.provider.discovery_feed(None, &cancel).await {
+        Ok(page) => videos_of(page.items),
+        Err(error) => {
+            tracing::debug!(%error, "the category hubs could not be read");
+            return Vec::new();
+        }
+    };
+    if !videos.is_empty() {
+        *state.fresh.lock() = Some((std::time::Instant::now(), videos.clone()));
+    }
+    videos
+}
+
+/// Interleaves the personal lists with one column of what is on the provider now.
+///
+/// The fresh column takes its turn like any seed, so with four seeds about a fifth of the feed is
+/// new to the viewer rather than adjacent to something they watched. Nothing personal left after
+/// the watched ones are removed means nothing at all, so the caller still falls through to its
+/// next source rather than serving hub videos under a label that claims they were chosen for you.
+fn blend(
+    personal: Vec<Vec<VideoSummary>>,
+    fresh: Vec<VideoSummary>,
+    exclude: &HashSet<String>,
+    limit: usize,
+) -> Vec<VideoSummary> {
+    let anything_personal = personal
+        .iter()
+        .flatten()
+        .any(|video| !exclude.contains(video.id.as_str()));
+    if !anything_personal {
+        return Vec::new();
+    }
+    let mut lists = personal;
+    if !fresh.is_empty() {
+        lists.push(fresh);
+    }
+    interleave(lists, exclude, limit)
+}
 
 /// Short-form videos for the Shorts tab.
 ///
