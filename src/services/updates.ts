@@ -7,8 +7,8 @@
  * at the point of use.
  *
  * BEASTUBE ships as an NSIS installer, and an update is the *next* installer: it is downloaded,
- * its signature is checked against the public key compiled into this binary, and it is then run
- * without a wizard (`installMode: passive` in `tauri.conf.json`) before the application restarts.
+ * its signature is checked against the public key compiled into this binary, and it is then
+ * run without a wizard (`installMode: quiet` in `tauri.conf.json`) before the application restarts.
  *
  * It is not a patch. Windows offers no delta mechanism through this path, so every update pulls the
  * whole installer down — which for BEASTUBE means roughly 50 MB, most of it the bundled ffmpeg.

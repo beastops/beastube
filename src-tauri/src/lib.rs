@@ -158,6 +158,28 @@ fn report_fatal_startup(detail: &str) {
     tracing::error!(%detail, "could not start the application shell");
 }
 
+/// The installer argument that puts an update where the running program is.
+///
+/// The NSIS installer chooses its folder in its first lines: the default per-user location, unless
+/// a registry value left by an earlier install names another. The two drifted apart on a real
+/// machine — the updater installed each new version into the default folder and restarted from
+/// there while the shortcuts kept launching the old copy, so every launch repeated the same 51 MB
+/// update. `/D=` is read by NSIS itself before any script runs and nothing in the script reassigns
+/// it, so naming this executable's folder makes the update replace the program that is running,
+/// whatever the registry says; the installer then records that folder for the next one. The
+/// argument must come last and must not be quoted, even around spaces — the plugin appends its
+/// extra arguments after its own, which is what makes it last.
+///
+/// A development build runs from `target/`, which is not somewhere to install anything.
+#[cfg(windows)]
+fn install_dir_arg() -> Option<String> {
+    if cfg!(debug_assertions) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(format!("/D={}", exe.parent()?.display()))
+}
+
 /// Builds and runs the desktop application.
 ///
 /// # Panics
@@ -177,7 +199,15 @@ pub fn run() {
         // Updates. The dependency was declared long before anything used it, which meant the
         // "Check for updates" string existed with nothing behind it; registering the plugin is what
         // turns that into a real control rather than a label.
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin({
+            let updater = tauri_plugin_updater::Builder::new();
+            #[cfg(windows)]
+            let updater = match install_dir_arg() {
+                Some(arg) => updater.installer_arg(arg),
+                None => updater,
+            };
+            updater.build()
+        })
         .invoke_handler(tauri::generate_handler![
             frontend_ready,
             commands::get_settings,

@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0 the minor number carries
 breaking changes.
 
+## [0.1.7] — 2026-10-23
+
+### Fixed
+
+- **An update installed a second copy of the program instead of replacing the first.** The
+  installer decides where to put the program in its first lines: the default per-user folder,
+  unless a value an earlier install left in the registry names another. On a machine whose first
+  install had gone somewhere else, the automatic update put each new version into the default
+  folder and restarted from there, while the shortcuts kept launching the old copy — so every
+  launch found itself out of date, downloaded the same 51 MB, and restarted into a folder nothing
+  else knew about. The updater now tells the installer where the running program lives, which the
+  installer honours before any of its own logic runs, so an update replaces the program that is
+  running rather than installing beside it. Measured with the published 0.1.6 installer: a wrong
+  registry value sent the silent update astray every time; with the folder named, the same
+  installer landed in the right place and corrected the value for the next one.
+
+  A copy running 0.1.6 takes _this_ update with the old logic. If it lands beside the program
+  rather than in it, run the 0.1.7 installer once by hand; every update after that is placed
+  correctly.
+
 ## [0.1.6] — 2026-09-12
 
 ### Fixed
