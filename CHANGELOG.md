@@ -6,6 +6,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0 the minor number carries
 breaking changes.
 
+## [0.1.9] — 2026-10-29
+
+### Fixed
+
+- **Two sets of subtitles.** With BEASTUBE's control bar, the subtitles button also switched on
+  YouTube's own captions inside the video, so the picture carried ours where you placed them and
+  YouTube's at the bottom edge, half hidden. Only ours are drawn now, and YouTube's are put away
+  when a video turns them on by itself.
+- **Auto-generated subtitles arrived seconds late.** Those tracks roll: the previous line stays up
+  while the next is spoken under it. Only one line was ever drawn, so each new one waited for the
+  old one to end — "love." was sung at 21.8 s and appeared at 26 s. Lines now build a word at a
+  time, as they are spoken, and the two rolling lines stack.
+- **Two-line subtitles became one long line.** Line breaks are kept, with a band behind each line.
+- **Styled subtitles showed every line two or three times.** Channels that style their subtitles
+  send each line twice — an outline and a fill, meant to be drawn on top of each other — and both
+  were drawn, stacked, with stale copies left behind as the words came in. Each line now shows once.
+- **Subtitles sat under the controls while paused.** They lift clear of the control bar whenever it
+  is showing, by its real height, and only as far as they need to.
+- **Subtitle size followed the window, not the picture.** It is now the site's proportion of the
+  picture's height, and the size setting scales it all the way, fullscreen included.
+- **The player could shift up inside its frame.** Bringing a control into view scrolled the
+  player's box, moving the picture, subtitles and controls together and showing a strip of
+  YouTube's own controls. The box can no longer scroll.
+- **Choosing an audio track did nothing.** YouTube's player keeps its track-switching to itself, so
+  every choice in the menu was silently refused. A small script inside the player now makes the
+  switch, and the menu shows the track actually playing.
+- **The volume was never remembered.** It is restored at launch, before anything plays, and saved
+  when you change it.
+- **A card's title did nothing when clicked.** Titles now open the video, as the thumbnail does.
+
+### Added
+
+- **Keyboard shortcuts in the player**, with the site's meanings: Space or K to play and pause, J
+  and L or the arrows to skip, 0–9 to jump, M to mute, F for fullscreen, C for subtitles, and
+  Shift with < or > to change speed. Double-click the picture for fullscreen.
+- **A seek bar like the site's**: the time under the pointer, how much has loaded, and a video's
+  chapters as segments, with the current chapter named beside the time.
+- **Every subtitle language a video has**, in the player's menu, and your choice is remembered.
+- **A description with working links.** Chapter times move the player, mentions open the channel,
+  links to other videos open here, hashtags search.
+
+### Changed
+
+- **Related videos are a compact list**, a small thumbnail with the text beside it, as on the site:
+  about ten to a screen instead of three.
+- **Search results are a list**, as on the site, and more load as you scroll — a search used to end
+  after its first twenty-odd results.
+- **The home feed is cut into whole rows**, so there is no lone card before a Shorts shelf.
+- **Refresh is an icon** on the right of the top bar.
+
 ## [0.1.8] — 2026-10-23
 
 ### Changed
