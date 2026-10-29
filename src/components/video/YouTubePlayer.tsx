@@ -8,9 +8,9 @@
  * Capability-gated, not silently broken:
  *
  * * **Can**: play/pause, seek, playback rate, volume, fullscreen, captions toggle, position
- *   reporting, therefore creator-marked segment skipping — and selecting a quality tier, which
- *   takes some explaining; see below.
- * * **Cannot**: read buffer level or dropped-frame counts. The embed exposes neither, so the
+ *   and buffered-range reporting, therefore creator-marked segment skipping — and selecting a
+ *   quality tier, which takes some explaining; see below.
+ * * **Cannot**: read buffer health or dropped-frame counts. The embed exposes neither, so the
  *   readouts for them are absent rather than inert.
  *
  * `setPlaybackQuality` really is a no-op — measured, not assumed: calling it with `hd1080` on a
@@ -339,6 +339,8 @@ interface YouTubePlayerInstance {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
   getCurrentTime: () => number;
   getDuration: () => number;
+  /** How much of the video is buffered, `0..1`. Documented, but treated as optional all the same. */
+  getVideoLoadedFraction?: () => number;
   getPlayerState: () => number;
   setVolume: (volume: number) => void;
   mute: () => void;
@@ -598,6 +600,13 @@ export interface YouTubePlayerProps {
    * and a grid that starts making noise as the pointer crosses it would be hostile anyway.
    */
   muted?: boolean;
+  /**
+   * The volume to start at, `0..100`, applied before playback begins.
+   *
+   * Applied in the ready handler rather than after it, so a video that autoplays starts at the
+   * viewer's volume instead of blaring for a moment at whatever the embed last remembered.
+   */
+  volume?: number;
   /** Show the player's own controls. Off for previews, where the card underneath is the control. */
   controls?: boolean;
   /**
@@ -694,6 +703,8 @@ export interface PlayerHandle {
    * rendition is on screen, because that rendition genuinely is 30fps.
    */
   isHighFrameRate: () => boolean;
+  /** How much of the video the embed has buffered, `0..1`, for the scrubber's loaded range. */
+  loadedFraction: () => number;
   setMuted: (muted: boolean) => void;
   /** Sets the volume, `0..100`, as the embed expresses it. */
   setVolume: (volume: number) => void;
@@ -767,6 +778,7 @@ export function YouTubePlayer({
   aspectRatio = '16 / 9',
   fill = false,
   muted = false,
+  volume,
   controls = true,
   loop = false,
   transparent = false,
@@ -903,6 +915,9 @@ export function YouTubePlayer({
 
   /** Whether the caller wants playback to begin by itself. Read live, not captured. */
   const autoplayNow = useEffectEvent(() => autoplay);
+
+  /** The volume and mute the caller wants, read live for the moment the player becomes ready. */
+  const soundNow = useEffectEvent(() => ({ volume, muted }));
 
   /** Whether the embed's own captions are wanted. Read live, so switching control bars applies. */
   const embedCaptionsNow = useEffectEvent(() => embedCaptions);
@@ -1078,6 +1093,20 @@ export function YouTubePlayer({
             // inconsistently once the player is constructed programmatically, and a short that does
             // not start shows the embed's poster chrome — its title bar and a play button — which
             // is the single most visible defect on the Shorts surface.
+            // The viewer's volume before anything plays. The embed keeps its own memory of the last
+            // volume, which is not the viewer's setting and is usually not what this application
+            // last showed.
+            const sound = soundNow();
+            if (sound.volume !== undefined) {
+              try {
+                playerRef.current?.setVolume(Math.max(0, Math.min(100, sound.volume)));
+                if (sound.muted) playerRef.current?.mute();
+                else playerRef.current?.unMute();
+              } catch {
+                // Not ready after all; the next command applies it.
+              }
+            }
+
             if (autoplayNow()) {
               try {
                 playerRef.current?.playVideo();
@@ -1580,6 +1609,14 @@ export function YouTubePlayer({
           return playerRef.current?.getVideoData().video_quality_features?.includes('hfr') ?? false;
         } catch {
           return false;
+        }
+      },
+      loadedFraction: () => {
+        try {
+          const fraction = playerRef.current?.getVideoLoadedFraction?.() ?? 0;
+          return Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+        } catch {
+          return 0;
         }
       },
       seek: (positionMs: number) => {

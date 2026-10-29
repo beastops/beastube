@@ -51,7 +51,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useEffectEvent, useRef, useState, type ReactNode } from 'react';
 
 import { CaptionOverlay } from '@/components/video/CaptionOverlay';
 import { defaultCaptionTrack } from '@/components/video/captions';
@@ -59,11 +59,20 @@ import { qualityLabel, YouTubePlayer, type PlayerHandle } from '@/components/vid
 import { useTranslation } from '@/i18n/context';
 import { playerHandlers, usePlayerStore } from '@/stores/player';
 import { useSettingsStore } from '@/stores/settings';
-import type { Quality } from '@/types/domain';
+import type { Chapter, Quality } from '@/types/domain';
 import { CHROME_IDLE_MS, EMBED_CHROME_CROP_PX } from '@/components/video/chrome';
 
 /** Space left between the top of the controls and a caption lifted clear of them. */
 const CAPTION_CLEARANCE_GAP_PX = 10;
+
+/** How long a volume change is left to settle before it is saved, so a drag writes once. */
+const SOUND_SAVE_DELAY_MS = 500;
+
+/** How long the confirmation of a key press stays on the picture. */
+const FLASH_MS = 650;
+
+/** How far the volume keys move it, in the embed's `0..100`. */
+const VOLUME_STEP = 5;
 
 /**
  * Where the player waits when nothing wants it: off-screen, alive, and out of the way.
@@ -186,6 +195,8 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
   const [erroredId, setErroredId] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [at, setAt] = useState({ positionMs: 0, durationMs: 0 });
+  /** How much of the video the embed has buffered, `0..1`, drawn as the scrubber's loaded range. */
+  const [buffered, setBuffered] = useState(0);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(100);
   // Seeded from the setting so the caption button reflects what the embed is actually doing
@@ -343,13 +354,32 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
   const captionsAvailable = (session?.hasCaptions ?? false) || embedCaptionsFor === videoId;
 
   const settingsLoaded = useSettingsStore((state) => state.loaded);
+  const savedVolume = useSettingsStore((state) => state.settings.playback.volume);
+  const savedMuted = useSettingsStore((state) => state.settings.playback.muted);
   const seeded = useRef(false);
   useEffect(() => {
     if (!settingsLoaded || seeded.current) return;
     seeded.current = true;
     setCaptionsOn((was) => (was === captionsByDefault ? was : captionsByDefault));
     setQuality((was) => (was === 'auto' ? defaultQuality : was));
-  }, [settingsLoaded, captionsByDefault, defaultQuality]);
+    // The volume was a stored setting nothing read, so every launch started at full volume and
+    // every change was forgotten. Applied to a player that is already up, too: the document can
+    // arrive after the first video has started.
+    const level = Math.round(Math.max(0, Math.min(1, savedVolume)) * 100);
+    setVolume(level);
+    setMuted(savedMuted);
+    playerRef.current?.setVolume(level);
+    playerRef.current?.setMuted(savedMuted);
+  }, [settingsLoaded, captionsByDefault, defaultQuality, savedVolume, savedMuted]);
+
+  /** Writes the volume back to the settings document, once the slider has come to rest. */
+  const soundTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rememberSound = useCallback((level: number, silent: boolean) => {
+    if (soundTimer.current !== null) clearTimeout(soundTimer.current);
+    soundTimer.current = setTimeout(() => {
+      useSettingsStore.getState().update({ playback: { volume: level / 100, muted: silent } });
+    }, SOUND_SAVE_DELAY_MS);
+  }, []);
   const [qualities, setQualities] = useState<Quality[]>([]);
   /**
    * The tier actually being served, which is not the same thing as the one requested.
@@ -477,6 +507,217 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
     playerRef.current?.toggle();
   }, []);
 
+  /** Into fullscreen or out of it: the button, the `F` key and a double-click on the picture. */
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement !== null) {
+      void document.exitFullscreen().catch(() => {
+        // Already left, or refused. Nothing to recover.
+      });
+    } else {
+      void boxRef.current?.requestFullscreen().catch(() => {
+        // Refused when the gesture is not trusted, or unavailable here.
+      });
+    }
+  }, []);
+
+  /** Sets the volume and mute together, on screen, in the player and in the settings. */
+  const applySound = useCallback(
+    (level: number, silent: boolean) => {
+      setVolume(level);
+      setMuted(silent);
+      playerRef.current?.setVolume(level);
+      playerRef.current?.setMuted(silent);
+      rememberSound(level, silent);
+    },
+    [rememberSound],
+  );
+
+  /**
+   * A word in the middle of the picture confirming what a key did.
+   *
+   * A key changes something nobody is looking at — the volume, the speed, ten seconds on — so the
+   * player says what happened, as the site does, and then gets out of the way.
+   */
+  const [flash, setFlash] = useState<{ id: number; content: ReactNode } | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const announce = useCallback((content: ReactNode) => {
+    if (flashTimer.current !== null) clearTimeout(flashTimer.current);
+    setFlash((was) => ({ id: (was?.id ?? 0) + 1, content }));
+    flashTimer.current = setTimeout(() => {
+      setFlash(null);
+    }, FLASH_MS);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (flashTimer.current !== null) clearTimeout(flashTimer.current);
+      if (soundTimer.current !== null) clearTimeout(soundTimer.current);
+    },
+    [],
+  );
+
+  // The track picked for this video, else the first of the viewer's languages the video has, else
+  // the video's own. The interface language stands in for an unset caption language, which is what
+  // the setting has always said it does.
+  const captionTracks = session?.captionTracks ?? [];
+  const captionTrack =
+    (chosenCaptions?.videoId === videoId
+      ? captionTracks.find((track) => track.url === chosenCaptions.url)
+      : undefined) ??
+    defaultCaptionTrack(captionTracks, [
+      captionLanguage,
+      interfaceLanguage,
+      navigator.language,
+      t.locale,
+    ]);
+
+  /**
+   * The site's keyboard shortcuts, for the player on screen.
+   *
+   * There were none: the watch page answered only an arrow key on a focused scrubber, so Space
+   * scrolled the page and K, J, L, F, M and C — the keys everyone arrives with — did nothing.
+   *
+   * Keys the page also uses — the vertical arrows, Home and End — are taken only while focus is in
+   * the player, so they still scroll everywhere else. Typing in a field, a held modifier, an open
+   * dialog, a key a focused control already handled, and Space on a focused button are all left
+   * alone.
+   */
+  const onShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (videoId === null || session === null || slot === null) return;
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target !== null && isTextEntry(target)) return;
+    if (document.querySelector('[role="dialog"]') !== null) return;
+    const inPlayer = target !== null && (boxRef.current?.contains(target) ?? false);
+    if (event.key === ' ' && target?.closest('button, a, [role^="menuitem"]')) return;
+
+    const { positionMs, durationMs } = at;
+    const seekTo = (targetMs: number) => {
+      const clamped = Math.max(0, durationMs > 0 ? Math.min(durationMs - 250, targetMs) : targetMs);
+      setAt((current) => ({ ...current, positionMs: clamped }));
+      playerRef.current?.seek(clamped);
+      wake();
+    };
+    const step = (seconds: number) => {
+      seekTo(positionMs + seconds * 1000);
+      announce(
+        t.t(seconds > 0 ? 'player.skippedAhead' : 'player.skippedBack', {
+          seconds: Math.abs(seconds),
+        }),
+      );
+    };
+    const sound = (level: number, silent: boolean) => {
+      applySound(level, silent);
+      announce(
+        <>
+          {silent || level === 0 ? <VolumeX size={22} /> : <Volume2 size={22} />}
+          <span>{silent ? t.t('player.muted') : `${String(level)}%`}</span>
+        </>,
+      );
+    };
+
+    if (/^[0-9]$/.test(event.key)) {
+      if (durationMs <= 0) return;
+      seekTo((durationMs * Number(event.key)) / 10);
+      event.preventDefault();
+      return;
+    }
+
+    switch (event.key) {
+      case ' ':
+      case 'k':
+      case 'K':
+        toggle();
+        announce(playing ? <Pause size={28} /> : <Play size={28} />);
+        break;
+      case 'j':
+      case 'J':
+        step(-seekStepLargeSeconds);
+        break;
+      case 'l':
+      case 'L':
+        step(seekStepLargeSeconds);
+        break;
+      case 'ArrowLeft':
+        step(-seekStepSeconds);
+        break;
+      case 'ArrowRight':
+        step(seekStepSeconds);
+        break;
+      case 'ArrowUp':
+        if (!inPlayer) return;
+        sound(Math.min(100, (muted ? 0 : volume) + VOLUME_STEP), false);
+        break;
+      case 'ArrowDown':
+        if (!inPlayer) return;
+        sound(Math.max(0, (muted ? 0 : volume) - VOLUME_STEP), false);
+        break;
+      case 'Home':
+        if (!inPlayer) return;
+        seekTo(0);
+        break;
+      case 'End':
+        if (!inPlayer || durationMs <= 0) return;
+        seekTo(durationMs);
+        break;
+      case 'm':
+      case 'M':
+        // Unmuting a slider left at zero would be unmuting into silence.
+        sound(muted && volume === 0 ? 50 : volume, !muted);
+        break;
+      case 'f':
+      case 'F':
+        toggleFullscreen();
+        break;
+      case 'c':
+      case 'C': {
+        if (!captionsAvailable) return;
+        const next = !captionsOn;
+        setCaptionsOn(next);
+        // Under YouTube's own bar the embed draws them; under ours the overlay does.
+        if (nativeControls) playerRef.current?.setCaptions(next);
+        // The language that came on, which is what a viewer pressing C wants to know.
+        const named =
+          captionTrack === undefined
+            ? t.t('player.captionsOn')
+            : captionTrack.is_auto_generated === true
+              ? t.t('player.captionsAutoGenerated', { language: captionTrack.language_name })
+              : captionTrack.language_name;
+        announce(
+          <>
+            {next ? <Captions size={22} /> : <CaptionsOff size={22} />}
+            <span>{next ? named : t.t('player.captionsOff')}</span>
+          </>,
+        );
+        break;
+      }
+      case '>':
+      case '<': {
+        const ladder = [...rates].sort((a, b) => a - b);
+        const index = ladder.indexOf(rate);
+        const next = ladder[event.key === '>' ? index + 1 : index - 1];
+        if (index < 0 || next === undefined) return;
+        setRate(next);
+        playerRef.current?.setRate(next);
+        announce(next === 1 ? t.t('player.speedNormal') : `${String(next)}×`);
+        break;
+      }
+      default:
+        return;
+    }
+    event.preventDefault();
+  });
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => {
+      onShortcut(event);
+    };
+    window.addEventListener('keydown', listener);
+    return () => {
+      window.removeEventListener('keydown', listener);
+    };
+  }, []);
+
   // The store retains the last video, so the parked player stays pointed at something without this
   // component needing state and an effect to remember it.
   if (videoId === null) return null;
@@ -495,20 +736,11 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
 
   const chromeUp = chromeVisible || !playing || settingsOpen || chromeFocused;
 
-  // The track picked for this video, else the first of the viewer's languages the video has, else
-  // the video's own. The interface language stands in for an unset caption language, which is what
-  // the setting has always said it does.
-  const captionTracks = session?.captionTracks ?? [];
-  const captionTrack =
-    (chosenCaptions?.videoId === videoId
-      ? captionTracks.find((track) => track.url === chosenCaptions.url)
-      : undefined) ??
-    defaultCaptionTrack(captionTracks, [
-      captionLanguage,
-      interfaceLanguage,
-      navigator.language,
-      t.locale,
-    ]);
+  // The site grows its controls in fullscreen, where a 20-pixel icon is lost on a television-sized
+  // picture.
+  const iconSize = fullscreen ? 24 : 20;
+  const chapters = session?.chapters ?? [];
+  const chapter = chapters.findLast((one) => one.start_ms <= at.positionMs);
 
   return (
     <div
@@ -660,6 +892,9 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
               // bail-out rather than a render.
               const now = playerRef.current?.currentQuality() ?? null;
               setServing((was) => (was === now ? was : now));
+              // Written only when it has moved visibly, so a steady buffer costs no renders.
+              const loaded = playerRef.current?.loadedFraction() ?? 0;
+              setBuffered((was) => (Math.abs(was - loaded) < 0.002 ? was : loaded));
               // Also polled, because the embed learns about its caption module a moment after
               // playback starts. One-directional for the reason above: this can confirm captions
               // exist, never deny it. Written only when it changes, so the common case is a
@@ -728,6 +963,8 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                 }
                 toggle();
               }}
+              // As on the site: the two clicks toggle playback twice, which leaves it as it was.
+              onDoubleClick={toggleFullscreen}
               aria-label={t.t(playing ? 'player.pause' : 'player.play')}
               // The pointer goes when the controls do, as it does on the site. It matters most in
               // fullscreen, where an arrow parked over the picture is the one piece of chrome left
@@ -749,6 +986,8 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
             >
               <Scrubber
                 fraction={fraction}
+                buffered={buffered}
+                chapters={chapters}
                 durationMs={at.durationMs}
                 stepSeconds={seekStepSeconds}
                 largeStepSeconds={seekStepLargeSeconds}
@@ -764,19 +1003,24 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                 <ControlButton
                   label={t.t(playing ? 'player.pause' : 'player.play')}
                   onClick={toggle}
+                  large={fullscreen}
                 >
-                  {playing ? <Pause size={20} /> : <Play size={20} />}
+                  {playing ? <Pause size={iconSize} /> : <Play size={iconSize} />}
                 </ControlButton>
 
                 <ControlButton
                   label={t.t(muted ? 'player.unmute' : 'player.mute')}
                   onClick={() => {
-                    const next = !muted;
-                    setMuted(next);
-                    playerRef.current?.setMuted(next);
+                    // Unmuting a slider left at zero would be unmuting into silence.
+                    applySound(muted && volume === 0 ? 50 : volume, !muted);
                   }}
+                  large={fullscreen}
                 >
-                  {muted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                  {muted || volume === 0 ? (
+                    <VolumeX size={iconSize} />
+                  ) : (
+                    <Volume2 size={iconSize} />
+                  )}
                 </ControlButton>
 
                 <input
@@ -786,22 +1030,30 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                   value={muted ? 0 : volume}
                   aria-label={t.t('player.volume')}
                   onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setVolume(next);
-                    playerRef.current?.setVolume(next);
                     // Moving the slider off zero is an unmute; nobody drags a slider expecting silence.
-                    const shouldMute = next === 0;
-                    if (shouldMute !== muted) {
-                      setMuted(shouldMute);
-                      playerRef.current?.setMuted(shouldMute);
-                    }
+                    const next = Number(event.target.value);
+                    applySound(next, next === 0);
                   }}
                   className="accent-brand w-20"
                 />
 
-                <span className="ml-1 font-mono text-xs tabular-nums text-white/90">
+                <span
+                  className={`ml-1 shrink-0 font-mono tabular-nums text-white/90 ${fullscreen ? 'text-sm' : 'text-xs'}`}
+                >
                   {t.duration(at.positionMs)} / {t.duration(at.durationMs)}
                 </span>
+
+                {/* The chapter being watched, as the site names it beside the time. */}
+                {chapter !== undefined && (
+                  <span
+                    className={`min-w-0 truncate text-white/90 ${fullscreen ? 'text-sm' : 'text-xs'}`}
+                  >
+                    <span aria-hidden="true" className="mx-1.5">
+                      ·
+                    </span>
+                    {chapter.title}
+                  </span>
+                )}
 
                 <span className="flex-1" />
 
@@ -815,12 +1067,14 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                       // own captions as well, so the picture carried two sets.
                       setCaptionsOn(!captionsOn);
                     }}
+                    large={fullscreen}
                   >
-                    {captionsOn ? <Captions size={20} /> : <CaptionsOff size={20} />}
+                    {captionsOn ? <Captions size={iconSize} /> : <CaptionsOff size={iconSize} />}
                   </ControlButton>
                 )}
 
                 <SettingsMenu
+                  large={fullscreen}
                   open={settingsOpen}
                   onOpenChange={(next) => {
                     setMenuFor(next ? videoId : null);
@@ -877,23 +1131,27 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
 
                 <ControlButton
                   label={t.t(fullscreen ? 'player.exitFullscreen' : 'player.fullscreen')}
-                  onClick={() => {
-                    if (document.fullscreenElement !== null) {
-                      void document.exitFullscreen().catch(() => {
-                        // Already left, or refused. Nothing to recover.
-                      });
-                    } else {
-                      void boxRef.current?.requestFullscreen().catch(() => {
-                        // Refused when the gesture is not trusted, or unavailable here.
-                      });
-                    }
-                  }}
+                  onClick={toggleFullscreen}
+                  large={fullscreen}
                 >
-                  {fullscreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
+                  {fullscreen ? <Minimize2 size={iconSize} /> : <Maximize2 size={iconSize} />}
                 </ControlButton>
               </div>
             </div>
           </>
+        )}
+
+        {/* What a key press just did, briefly, in the middle of the picture. */}
+        {flash !== null && (
+          <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center">
+            <div
+              key={flash.id}
+              role="status"
+              className="animate-player-flash flex min-h-14 min-w-14 items-center justify-center gap-2 rounded-full bg-black/65 px-4 text-base font-medium text-white tabular-nums"
+            >
+              {flash.content}
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -918,6 +1176,7 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
  * instant it was pressed would be describing the click rather than the picture.
  */
 function SettingsMenu({
+  large,
   open,
   onOpenChange,
   audioTracks,
@@ -936,6 +1195,8 @@ function SettingsMenu({
   captionTrack,
   onCaptions,
 }: {
+  /** Fullscreen's larger control bar. */
+  large: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   audioTracks: { id: string; label: string; isDefault: boolean }[];
@@ -979,11 +1240,12 @@ function SettingsMenu({
       <ControlButton
         label={t.t('player.settings')}
         active={open}
+        large={large}
         onClick={() => {
           onOpenChange(!open);
         }}
       >
-        <Settings size={20} />
+        <Settings size={large ? 24 : 20} />
       </ControlButton>
 
       {/* Mounted only while open, which is what returns it to the top level. Holding the current
@@ -1324,9 +1586,15 @@ function OptionRow({
  *
  * Pointer capture rather than window listeners: the drag belongs to this element, so releasing
  * outside the window still ends it and no listener can outlive the component.
+ *
+ * Shaped like the site's: the buffered range under the played one, the time under the pointer
+ * before a click commits to it, a dot on the playhead while the bar is in use, and the video's
+ * chapters as separate segments named in the hover label.
  */
 function Scrubber({
   fraction,
+  buffered,
+  chapters,
   durationMs,
   stepSeconds,
   largeStepSeconds,
@@ -1334,17 +1602,40 @@ function Scrubber({
   onSeek,
 }: {
   fraction: number;
+  buffered: number;
+  chapters: readonly Chapter[];
   durationMs: number;
   stepSeconds: number;
   largeStepSeconds: number;
   label: string;
   onSeek: (fraction: number) => void;
 }): ReactNode {
-  const seekTo = (element: HTMLElement, clientX: number) => {
+  const t = useTranslation();
+  /** Where the pointer is over the bar, `0..1`, or `null` when it is not. */
+  const [hover, setHover] = useState<number | null>(null);
+
+  const fractionAt = (element: HTMLElement, clientX: number): number | null => {
     const rect = element.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    onSeek(Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)));
+    if (rect.width <= 0) return null;
+    return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
   };
+
+  // A chapter list is only a set of segments when it has at least two, all inside the video.
+  const starts =
+    durationMs > 0 && chapters.length > 1
+      ? chapters
+          .map((chapter) => chapter.start_ms / durationMs)
+          .filter(
+            (start, index, all) => start < 1 && (index === 0 || start > (all[index - 1] ?? 0)),
+          )
+      : [];
+  const bounds = starts.length > 1 ? [0, ...starts.slice(1)] : [0];
+  const segments = bounds.map((start, index) => ({ start, end: bounds[index + 1] ?? 1 }));
+  const share = (value: number, segment: { start: number; end: number }) =>
+    `${String(Math.min(1, Math.max(0, (value - segment.start) / (segment.end - segment.start))) * 100)}%`;
+
+  const hoveredChapter =
+    hover === null ? undefined : chapters.findLast((one) => one.start_ms <= hover * durationMs);
 
   return (
     <div
@@ -1354,19 +1645,27 @@ function Scrubber({
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Math.round(fraction * 100)}
+      aria-valuetext={`${t.duration(fraction * durationMs)} / ${t.duration(durationMs)}`}
       // A generous hit area around a thin bar, which is how a scrubber stays grabbable without
       // looking heavy.
-      className="group pointer-events-auto -mx-1 cursor-pointer px-1 py-2"
+      className="group pointer-events-auto relative -mx-1 cursor-pointer px-1 py-2"
       onPointerDown={(event) => {
         event.currentTarget.setPointerCapture(event.pointerId);
-        seekTo(event.currentTarget, event.clientX);
+        const next = fractionAt(event.currentTarget, event.clientX);
+        if (next !== null) onSeek(next);
       }}
       onPointerMove={(event) => {
-        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-        seekTo(event.currentTarget, event.clientX);
+        const next = fractionAt(event.currentTarget, event.clientX);
+        setHover(next);
+        if (next !== null && event.currentTarget.hasPointerCapture(event.pointerId)) onSeek(next);
+      }}
+      onPointerLeave={() => {
+        setHover(null);
       }}
       onKeyDown={(event) => {
         if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+        // Handled here, so the player's own arrow-key shortcut does not seek a second time.
+        event.preventDefault();
         // The viewer's own step, in seconds, converted to a fraction of this video. It used to be
         // a hardcoded five percent, which made both "skip amount" settings inert — and meant one
         // press moved eight seconds of a three-minute song and three minutes of an hour-long talk.
@@ -1377,19 +1676,67 @@ function Scrubber({
         else onSeek(Math.max(0, fraction - step));
       }}
     >
-      <div className="h-[3px] w-full rounded-full bg-white/30 transition-[height] group-hover:h-[5px]">
+      <div className="relative flex h-[3px] w-full gap-[2px] transition-[height] group-hover:h-[5px]">
+        {segments.map((segment) => (
+          <div
+            key={segment.start}
+            className="relative h-full min-w-0 overflow-hidden bg-white/25 first:rounded-l-full last:rounded-r-full"
+            style={{ flex: `${String(segment.end - segment.start)} 1 0` }}
+          >
+            <div
+              className="absolute inset-y-0 left-0 bg-white/30"
+              style={{ width: share(buffered, segment) }}
+            />
+            {hover !== null && (
+              <div
+                className="absolute inset-y-0 left-0 bg-white/35"
+                style={{ width: share(hover, segment) }}
+              />
+            )}
+            <div
+              // Width rather than a transform: the fill is a child of a rounded track, and a scaled
+              // child would round its own right edge in the wrong place.
+              className="bg-brand absolute inset-y-0 left-0"
+              style={{ width: share(fraction, segment) }}
+            />
+          </div>
+        ))}
         <div
-          className="bg-brand h-full rounded-full"
-          // Width rather than a transform: the fill is a child of a rounded track, and a scaled
-          // child would round its own right edge in the wrong place.
-          style={{ width: `${String(fraction * 100)}%` }}
+          aria-hidden="true"
+          className="bg-brand absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 scale-0 rounded-full transition-transform group-hover:scale-100 group-focus-visible:scale-100"
+          style={{ left: `${String(fraction * 100)}%` }}
         />
       </div>
+
+      {hover !== null && durationMs > 0 && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute bottom-full mb-1 -translate-x-1/2 rounded-md bg-black/80 px-2 py-1 text-center text-xs whitespace-nowrap text-white"
+          // Kept inside the bar at either end, so the label of the first and last seconds is not
+          // pushed off the picture.
+          style={{ left: `clamp(2.5rem, ${String(hover * 100)}%, calc(100% - 2.5rem))` }}
+        >
+          {hoveredChapter !== undefined && (
+            <div className="max-w-56 truncate font-medium">{hoveredChapter.title}</div>
+          )}
+          <div className="tabular-nums">{t.duration(hover * durationMs)}</div>
+        </div>
+      )}
     </div>
   );
 }
 
-/** One control on the bar: legible over any frame, no chrome until hovered. */
+/** Whether `node` takes typed input, in which case a letter is a letter and not a shortcut. */
+function isTextEntry(node: HTMLElement): boolean {
+  // Every input, not only text: the volume slider is a range input, and its arrow keys are its own.
+  return (
+    node.isContentEditable ||
+    node instanceof HTMLInputElement ||
+    node instanceof HTMLTextAreaElement ||
+    node instanceof HTMLSelectElement
+  );
+}
+
 /**
  * Whether `node` holds focus the browser considers worth showing a ring for.
  *
@@ -1415,16 +1762,20 @@ function isKeyboardFocus(node: EventTarget | null): boolean {
   }
 }
 
+/** One control on the bar: legible over any frame, no chrome until hovered. */
 function ControlButton({
   label,
   onClick,
   children,
   active = false,
+  large = false,
 }: {
   label: string;
   onClick: () => void;
   children: ReactNode;
   active?: boolean;
+  /** Fullscreen's larger control bar. */
+  large?: boolean;
 }): ReactNode {
   return (
     <button
@@ -1434,7 +1785,8 @@ function ControlButton({
       title={label}
       aria-pressed={active}
       className={[
-        'grid size-9 shrink-0 place-items-center rounded-full text-white',
+        'grid shrink-0 place-items-center rounded-full text-white',
+        large ? 'size-11' : 'size-9',
         'transition-[background-color] duration-[var(--duration-chrome-button)] ease-[var(--ease-player-out)] hover:bg-white/15',
         active ? 'bg-white/20' : '',
       ].join(' ')}

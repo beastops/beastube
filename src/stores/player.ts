@@ -27,7 +27,7 @@
 
 import { create } from 'zustand';
 
-import type { AudioTrack, CaptionTrack, PlaybackState, VideoId } from '@/types/domain';
+import type { AudioTrack, CaptionTrack, Chapter, PlaybackState, VideoId } from '@/types/domain';
 
 /** What to play, and how to start it. */
 export interface PlayerSession {
@@ -69,6 +69,13 @@ export interface PlayerSession {
    * response and is reliable. The embed's list is used only to find the object to hand back to it.
    */
   audioTracks?: AudioTrack[];
+  /**
+   * The video's chapters, earliest first, when it has any.
+   *
+   * Drawn into the scrubber as segments and named beside the time, as the site does — a long
+   * video's chapters are how a viewer finds their way around it.
+   */
+  chapters?: Chapter[];
 }
 
 /** Events the owning view wants, kept out of the reactive store deliberately. */
