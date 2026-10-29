@@ -11,7 +11,15 @@
  */
 
 import { BadgeCheck, Clapperboard, ListVideo } from 'lucide-react';
-import { Fragment, useCallback, useRef, useState, type ReactNode, useEffect } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import { EmptyState } from '@/components/common/EmptyState';
 import { LazyImage } from '@/components/common/LazyImage';
@@ -54,6 +62,7 @@ import {
   type ChannelDetails,
   type ChannelLink,
   type ChannelTab,
+  type ContinuationToken,
   type ExploreCategory,
   type LocalPlaylist,
   type LocalPlaylistId,
@@ -135,39 +144,59 @@ function FeedCard({ video, width }: { video: VideoSummary; width?: number }): Re
   );
 }
 
-/** Renders a heterogeneous search result. */
-function SearchResultCard({ item }: { item: SearchItem }): ReactNode {
+/**
+ * One search result, as a row of the site's results list.
+ *
+ * A channel takes the thumbnail's column for its avatar, as on the site, so channels and videos
+ * line up down the list instead of a channel reading as a stray tile.
+ */
+function SearchRow({ item }: { item: SearchItem }): ReactNode {
   const t = useTranslation();
 
   if (item.type === 'video') {
-    return <FeedCard video={item} />;
+    return <VideoCard video={item} layout="list" />;
   }
+
+  // The column a video's thumbnail occupies, so everything in the list shares one left edge.
+  const column =
+    'flex w-full shrink-0 justify-center @[560px]:w-[min(42%,500px)] @[560px]:min-w-60';
 
   if (item.type === 'channel') {
     const avatar = item.avatar?.at(-1);
+    const details = [
+      item.handle,
+      item.subscriber_count === undefined
+        ? undefined
+        : t.plural('video.subscribers', item.subscriber_count, {
+            count: t.compact(item.subscriber_count),
+          }),
+    ].filter((part) => part !== undefined && part !== '');
     return (
       <Link
         to={{ name: 'channel', channelId: item.id, tab: 'videos' }}
-        className="transition-surface hover:bg-surface-hover flex flex-col items-center gap-3 rounded-lg p-4 text-center"
+        className="group flex flex-col items-center gap-3 @[560px]:flex-row @[560px]:gap-4"
       >
-        {avatar ? (
-          <img
-            src={avatar.url}
-            alt=""
-            loading="lazy"
-            className="size-24 rounded-full object-cover"
-          />
-        ) : (
-          <div className="bg-surface size-24 rounded-full" />
-        )}
-        <div className="flex flex-col gap-1">
-          <span className="text-text line-clamp-1 text-base font-medium">{item.name}</span>
-          {item.subscriber_count !== undefined && (
-            <span className="text-text-muted text-xs">
-              {t.plural('video.subscribers', item.subscriber_count, {
-                count: t.compact(item.subscriber_count),
-              })}
-            </span>
+        <div className={column}>
+          {avatar ? (
+            <img
+              src={avatar.url}
+              alt=""
+              loading="lazy"
+              className="size-34 rounded-full object-cover"
+            />
+          ) : (
+            <div className="bg-surface size-34 rounded-full" />
+          )}
+        </div>
+        <div className="flex min-w-0 flex-col items-center gap-1 @[560px]:items-start">
+          <span className="text-text flex items-center gap-1 text-lg group-hover:underline">
+            {item.name}
+            {item.is_verified === true && (
+              <BadgeCheck size={16} className="shrink-0" aria-label={t.t('channel.verified')} />
+            )}
+          </span>
+          {details.length > 0 && (
+            <span className="text-text-muted text-xs">{details.join(' • ')}</span>
           )}
         </div>
       </Link>
@@ -176,20 +205,183 @@ function SearchResultCard({ item }: { item: SearchItem }): ReactNode {
 
   const cover = item.thumbnails?.at(-1);
   return (
-    <Link to={{ name: 'playlist', playlistId: item.id }} className="flex flex-col gap-3">
+    <Link
+      to={{ name: 'playlist', playlistId: item.id }}
+      className="group flex flex-col gap-3 @[560px]:flex-row @[560px]:gap-4"
+    >
       <div
-        className="bg-surface relative overflow-hidden rounded-md"
+        className="bg-surface relative w-full shrink-0 overflow-hidden rounded-xl @[560px]:w-[min(42%,500px)] @[560px]:min-w-60"
         style={{ aspectRatio: '16 / 9' }}
       >
         {cover && <img src={cover.url} alt="" loading="lazy" className="size-full object-cover" />}
         {item.video_count !== undefined && (
-          <span className="absolute right-1 bottom-1 rounded bg-black/80 px-1.5 py-0.5 text-2xs font-medium text-white">
+          <span className="absolute right-1 bottom-1 flex items-center gap-1 rounded bg-black/80 px-1.5 py-0.5 text-2xs font-medium text-white">
+            <ListVideo size={12} aria-hidden="true" />
             {t.plural('library.itemCount', item.video_count)}
           </span>
         )}
       </div>
-      <span className="text-text line-clamp-2 text-base font-medium">{item.title}</span>
+      <div className="flex min-w-0 flex-col gap-1 pt-0.5">
+        <span className="text-text line-clamp-2 text-lg group-hover:underline">{item.title}</span>
+        {item.channel_name !== undefined && (
+          <span className="text-text-muted text-xs">{item.channel_name}</span>
+        )}
+      </div>
     </Link>
+  );
+}
+
+/** A result row's shape while the next page loads. */
+function SearchRowSkeleton(): ReactNode {
+  return (
+    <div className="flex flex-col gap-3 @[560px]:flex-row @[560px]:gap-4" aria-hidden="true">
+      <div
+        className="skeleton w-full shrink-0 rounded-xl @[560px]:w-[min(42%,500px)] @[560px]:min-w-60"
+        style={{ aspectRatio: '16 / 9' }}
+      />
+      <div className="flex flex-1 flex-col gap-2 pt-1">
+        <div className="skeleton h-5 w-11/12 rounded" />
+        <div className="skeleton h-3 w-1/3 rounded" />
+        <div className="skeleton mt-2 h-3 w-1/2 rounded" />
+      </div>
+    </div>
+  );
+}
+
+/** A result's identity across pages: a channel and a video can share an id's shape. */
+function resultKey(item: SearchItem): string {
+  return `${item.type}:${item.id}`;
+}
+
+/** The site's results column: no wider than this, however wide the window. */
+const SEARCH_COLUMN_MAX = 'max-w-[1096px]';
+
+/** Placeholder rows shown while another page of results loads. */
+const SEARCH_MORE_PLACEHOLDERS = 3;
+
+/**
+ * The results list, growing as the viewer reaches its end.
+ *
+ * Search stopped after its first page: the provider has always handed back a token for the next
+ * one and the screen never asked, so a query ended after twenty-odd results however much more there
+ * was. Further pages load as the end comes near, each with its own Shorts shelf — shorts are not
+ * rows — and a page that repeats a result already shown does not show it twice.
+ *
+ * Keyed by its search where it is used, so a new query starts from its own first page.
+ */
+function SearchList({
+  query,
+  kind,
+  initial,
+  continuation,
+  playlists,
+}: {
+  query: string;
+  kind: SearchResultKind;
+  initial: readonly SearchItem[];
+  continuation: ContinuationToken | undefined;
+  playlists: boolean;
+}): ReactNode {
+  const [more, setMore] = useState<{
+    pages: SearchItem[][];
+    next: ContinuationToken | undefined;
+  }>({ pages: [], next: continuation });
+  const [loading, setLoading] = useState(false);
+  const inFlight = useRef(false);
+  const end = useRef<HTMLDivElement>(null);
+
+  const loadMore = useEffectEvent(() => {
+    const next = more.next;
+    if (inFlight.current || next === undefined) return;
+    inFlight.current = true;
+    setLoading(true);
+    void invoke('search', { query, filters: { kind }, continuation: next })
+      .then((results) => {
+        setMore((was) => {
+          const known = new Set([...initial, ...was.pages.flat()].map(resultKey));
+          const added = results.page.items.filter((item) => !known.has(resultKey(item)));
+          const token = results.page.continuation;
+          // A page that adds nothing, or hands back the token it was asked with, is the end: going
+          // on would ask for the same page for as long as the list stayed in view.
+          return {
+            pages: [...was.pages, added],
+            next: added.length === 0 || token === next ? undefined : token,
+          };
+        });
+      })
+      .catch(() => {
+        // The list ends where it is; what has loaded stays readable.
+        setMore((was) => ({ ...was, next: undefined }));
+      })
+      .finally(() => {
+        inFlight.current = false;
+        setLoading(false);
+      });
+  });
+
+  // Watches the end of the list against the scrolling region, well ahead of the viewer. Rebuilt
+  // after every page, so an end still in view once a short page has landed asks again rather than
+  // waiting for a scroll that will not come.
+  const loaded = more.pages.length;
+  useEffect(() => {
+    const node = end.current;
+    if (!node) return undefined;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) loadMore();
+      },
+      { root: node.closest('main'), rootMargin: '0px 0px 1200px 0px' },
+    );
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+    };
+  }, [loaded]);
+
+  const seen = new Set<string>();
+  const fresh = (item: SearchItem) => {
+    const key = resultKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return item.type !== 'playlist' || playlists;
+  };
+  const first = initial.filter(fresh);
+  const later = more.pages.map((page) => page.filter(fresh));
+
+  return (
+    <div className={`@container flex flex-col gap-4 ${SEARCH_COLUMN_MAX}`}>
+      {first.map((item) => (
+        <SearchRow key={`${item.type}-${item.id}`} item={item} />
+      ))}
+      {later.map((page, index) => {
+        const shorts = page.filter(
+          (item): item is Extract<SearchItem, { type: 'video' }> =>
+            item.type === 'video' && isPortraitVideo(item),
+        );
+        const rows = page.filter((item) => item.type !== 'video' || !isPortraitVideo(item));
+        return (
+          <Fragment key={index}>
+            {shorts.length > 0 && kind !== 'videos' && (
+              <ShortsShelf>
+                {shorts.map((item) => (
+                  <div key={item.id} className="shrink-0 snap-start">
+                    <ShortsCard video={item} />
+                  </div>
+                ))}
+              </ShortsShelf>
+            )}
+            {rows.map((item) => (
+              <SearchRow key={`${item.type}-${item.id}`} item={item} />
+            ))}
+          </Fragment>
+        );
+      })}
+      {loading &&
+        Array.from({ length: SEARCH_MORE_PLACEHOLDERS }, (_, index) => (
+          <SearchRowSkeleton key={index} />
+        ))}
+      <div ref={end} aria-hidden="true" className="h-px" />
+    </div>
   );
 }
 
@@ -225,6 +417,7 @@ function SearchView({ query, kind }: { query: string; kind: SearchResultKind }):
   );
   const isShort = (item: SearchItem) => item.type === 'video' && isPortraitVideo(item);
   const rest = kind === 'shorts' ? [] : items.filter((item) => !isShort(item));
+  const corrected = results.data?.corrected_query;
 
   return (
     <>
@@ -243,9 +436,13 @@ function SearchView({ query, kind }: { query: string; kind: SearchResultKind }):
         />
       ) : (
         <>
-          <p className="text-text-muted mb-4 text-xs">
-            {t.plural('search.resultCount', items.length)}
-          </p>
+          {/* The site's own correction, said so, rather than results for a different query
+              presented as answers to this one. */}
+          {corrected !== undefined && corrected !== query && (
+            <p className="text-text-muted mb-4 text-sm">
+              {t.t('search.showingResultsFor', { query: corrected })}
+            </p>
+          )}
 
           {shorts.length > 0 &&
             (kind === 'shorts' ? (
@@ -272,22 +469,20 @@ function SearchView({ query, kind }: { query: string; kind: SearchResultKind }):
               </section>
             ))}
 
-          {rest.length > 0 && (
-            <VideoGrid>
-              {rest.map((item) => (
-                <SearchResultCard key={`${item.type}-${itemKey(item)}`} item={item} />
-              ))}
-            </VideoGrid>
+          {(rest.length > 0 || kind !== 'shorts') && (
+            <SearchList
+              key={`${kind}:${query}:${results.data?.page.continuation ?? ''}`}
+              query={query}
+              kind={kind}
+              initial={rest}
+              continuation={results.data?.page.continuation}
+              playlists={supported.playlists}
+            />
           )}
         </>
       )}
     </>
   );
-}
-
-/** A stable list key for a heterogeneous result. */
-function itemKey(item: SearchItem): string {
-  return item.type === 'channel' ? item.id : item.type === 'playlist' ? item.id : item.id;
 }
 
 function HomeView(): ReactNode {

@@ -79,9 +79,11 @@ interface VideoCardProps {
   onRemoveFromHistory?: (() => void) | undefined;
   /**
    * `grid` for a feed; `row` for the compact list beside the player, where the site puts a small
-   * thumbnail with the text beside it rather than a full card that shows three to a screen.
+   * thumbnail with the text beside it rather than a full card that shows three to a screen; `list`
+   * for search results, a large thumbnail with the title and channel beside it, as the site lays
+   * them out. A list item stacks when its container is narrower than a thumbnail and a title.
    */
-  layout?: 'grid' | 'row';
+  layout?: 'grid' | 'row' | 'list';
 }
 
 /**
@@ -99,6 +101,7 @@ export const VideoCard = memo(function VideoCard({
   layout = 'grid',
 }: VideoCardProps): ReactNode {
   const row = layout === 'row';
+  const list = layout === 'list';
   const t = useTranslation();
   const [thumbnailFailed, setThumbnailFailed] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -130,7 +133,9 @@ export const VideoCard = memo(function VideoCard({
 
   return (
     <article
-      className={`group card-glow feed-card flex ${row ? 'gap-2' : 'flex-col gap-3'}`}
+      className={`group card-glow feed-card flex ${
+        row ? 'gap-2' : list ? 'flex-col gap-3 @[560px]:flex-row @[560px]:gap-4' : 'flex-col gap-3'
+      }`}
       data-glow={hovered && glow !== null ? 'on' : undefined}
       style={glow !== null ? ({ '--card-glow-color': glow } as CSSProperties) : undefined}
       // Hover is the best signal but not the only one, and it is unavailable to half the ways a
@@ -173,7 +178,13 @@ export const VideoCard = memo(function VideoCard({
         // length of every grid's tab order.
         tabIndex={-1}
         aria-hidden="true"
-        className={`relative block overflow-hidden ${row ? 'shrink-0 rounded-lg' : 'rounded-md'}`}
+        className={`relative block overflow-hidden ${
+          row
+            ? 'shrink-0 rounded-lg'
+            : list
+              ? 'w-full shrink-0 rounded-xl @[560px]:w-[min(42%,500px)] @[560px]:min-w-60'
+              : 'rounded-md'
+        }`}
         // The box holds its shape before the image arrives, which is what prevents layout shift.
         // A hovered card lifts its corners the way YouTube's does, so the preview reads as the card
         // coming forward rather than as an unrelated frame appearing.
@@ -216,9 +227,10 @@ export const VideoCard = memo(function VideoCard({
 
       {/* The avatar sits beside the text block rather than above it, which is the arrangement
           YouTube uses and the reason its cards read as one unit: the picture anchors the left edge
-          and the three lines of text hang off it. */}
-      <div className={`flex min-w-0 ${row ? 'flex-1' : 'gap-3'}`}>
-        {!row && avatar && (
+          and the three lines of text hang off it. In a search list it sits beside the channel
+          name instead, small, under the details — the site's order there. */}
+      <div className={`flex min-w-0 ${row || list ? 'flex-1' : 'gap-3'}`}>
+        {!row && !list && avatar && (
           <Link
             to={
               video.channel_id
@@ -241,10 +253,12 @@ export const VideoCard = memo(function VideoCard({
           </Link>
         )}
 
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className={`flex min-w-0 flex-1 flex-col ${list ? 'gap-1 pt-0.5' : 'gap-1'}`}>
           <div className="flex min-w-0 items-start gap-1">
             <h3
-              className={`text-text line-clamp-2 min-w-0 flex-1 leading-snug font-medium ${row ? 'text-sm' : 'text-base'}`}
+              className={`text-text line-clamp-2 min-w-0 flex-1 leading-snug ${
+                row ? 'text-sm font-medium' : list ? 'text-lg' : 'text-base font-medium'
+              }`}
             >
               {/* The title opens the video, as it does on the site. Only the thumbnail did, so the
                   line of text everyone reaches for first did nothing. */}
@@ -261,8 +275,24 @@ export const VideoCard = memo(function VideoCard({
             <CardMenu video={video} {...(onRemoveFromHistory ? { onRemoveFromHistory } : {})} />
           </div>
 
+          {list && metadata.length > 0 && (
+            <span className="text-text-muted text-xs">{metadata.join(' • ')}</span>
+          )}
+
           {video.channel_name !== undefined && (
-            <span className="text-text-muted flex min-w-0 items-center gap-1 text-xs">
+            <span
+              className={`text-text-muted flex min-w-0 items-center gap-1 text-xs ${list ? 'mt-2 gap-2' : ''}`}
+            >
+              {list && avatar && (
+                <img
+                  src={avatar.url}
+                  alt=""
+                  aria-hidden="true"
+                  loading="lazy"
+                  decoding="async"
+                  className="bg-surface size-6 shrink-0 rounded-full object-cover"
+                />
+              )}
               {video.channel_id ? (
                 <Link
                   to={{ name: 'channel', channelId: video.channel_id, tab: 'videos' }}
@@ -276,7 +306,8 @@ export const VideoCard = memo(function VideoCard({
               {video.channel_verified === true && (
                 <BadgeCheck
                   size={13}
-                  className="shrink-0"
+                  // In a list the row's wider gap is for the avatar; the badge stays by the name.
+                  className={list ? '-ml-1 shrink-0' : 'shrink-0'}
                   // Labelled rather than decorative: "verified" is a claim about the channel, and
                   // a sighted viewer gets it from the badge. Hiding it would drop that fact.
                   aria-label={t.t('channel.verified')}
@@ -285,7 +316,7 @@ export const VideoCard = memo(function VideoCard({
             </span>
           )}
 
-          {metadata.length > 0 && (
+          {!list && metadata.length > 0 && (
             <span className="text-text-muted text-xs">{metadata.join(' • ')}</span>
           )}
         </div>

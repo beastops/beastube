@@ -71,15 +71,12 @@ export const en = {
     resultsFor: 'Results for “{query}”',
     noResults: 'Nothing found for “{query}”',
     noResultsHint: 'Check the spelling, or try a broader search.',
+    showingResultsFor: 'Showing results for “{query}”',
     suggestions: 'Suggestions',
     recentSearches: 'Recent searches',
     clearHistory: 'Clear search history',
     removeSuggestion: 'Remove from history',
     filters: 'Filters',
-    resultCount: {
-      one: '{count} result',
-      other: '{count} results',
-    },
     filter: {
       type: 'Type',
       uploadDate: 'Upload date',

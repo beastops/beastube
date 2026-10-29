@@ -70,15 +70,12 @@ export const es: PartialCatalogue = {
     resultsFor: 'Resultados de «{query}»',
     noResults: 'No se encontró nada para «{query}»',
     noResultsHint: 'Revisa la ortografía o prueba con una búsqueda más amplia.',
+    showingResultsFor: 'Mostrando resultados de «{query}»',
     suggestions: 'Sugerencias',
     recentSearches: 'Búsquedas recientes',
     clearHistory: 'Borrar historial de búsqueda',
     removeSuggestion: 'Quitar del historial',
     filters: 'Filtros',
-    resultCount: {
-      one: '{count} resultado',
-      other: '{count} resultados',
-    },
     kind: {
       all: 'Todo',
       videos: 'Vídeos',

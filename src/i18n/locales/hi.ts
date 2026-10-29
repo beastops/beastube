@@ -75,15 +75,12 @@ export const hi: PartialCatalogue = {
     resultsFor: '“{query}” के परिणाम',
     noResults: '“{query}” के लिए कुछ नहीं मिला',
     noResultsHint: 'वर्तनी जाँचें, या कुछ और सामान्य खोजें।',
+    showingResultsFor: '“{query}” के नतीजे दिखाए जा रहे हैं',
     suggestions: 'सुझाव',
     recentSearches: 'हाल की खोजें',
     clearHistory: 'खोज इतिहास साफ़ करें',
     removeSuggestion: 'इतिहास से हटाएँ',
     filters: 'फ़िल्टर',
-    resultCount: {
-      one: '{count} परिणाम',
-      other: '{count} परिणाम',
-    },
     kind: {
       all: 'सभी',
       videos: 'वीडियो',
