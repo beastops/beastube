@@ -14,12 +14,14 @@
  * list — on every tick.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Clapperboard } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { ErrorState } from '@/components/common/ErrorState';
-import { ShortsCard } from '@/components/video/ShortsCard';
+import { parseDescription, partsFromRuns } from '@/components/video/description';
+import { ShortsCard, ShortsShelf } from '@/components/video/ShortsCard';
 import { VideoActions } from '@/components/video/VideoActions';
-import { VideoCard, VideoGrid } from '@/components/video/VideoCard';
+import { VideoCard } from '@/components/video/VideoCard';
 import { Link, useNavigate } from '@/app/router';
 import { setPlayerHandlers, usePlayerStore } from '@/stores/player';
 import { useAsyncResource } from '@/hooks/useAsyncResource';
@@ -27,13 +29,22 @@ import { useTranslation } from '@/i18n/context';
 import { invoke } from '@/services/ipc';
 import { videoDetails } from '@/services/videoCache';
 import { useSettingsStore } from '@/stores/settings';
-import { isPortraitVideo, type PlaybackState, type VideoId } from '@/types/domain';
+import {
+  isPortraitVideo,
+  type DescriptionRun,
+  type PlaybackState,
+  type VideoId,
+  type VideoSummary,
+} from '@/types/domain';
 
 /** Interval between position checkpoints while playing. */
 const CHECKPOINT_INTERVAL_MS = 10_000;
 
 /** Below this, a stored position is not worth resuming from. Mirrors the Rust rule. */
 const MIN_RESUME_MS = 15_000;
+
+/** Rows of related videos before the Shorts shelf, if the video has related shorts at all. */
+const SHORTS_AFTER_ROWS = 4;
 
 export interface WatchViewProps {
   videoId: VideoId;
@@ -253,6 +264,8 @@ export function WatchView({ videoId, startAtMs }: WatchViewProps): React.ReactNo
   }
 
   const relatedItems = related.data?.items ?? [];
+  const relatedVideos = relatedItems.filter((item) => !isPortraitVideo(item));
+  const relatedShorts = relatedItems.filter(isPortraitVideo);
 
   // The largest rendition, because this image is scaled up and blurred: a small one would band.
   const ambientSource = details?.thumbnails?.at(-1)?.url;
@@ -392,7 +405,11 @@ export function WatchView({ videoId, startAtMs }: WatchViewProps): React.ReactNo
                       descriptionExpanded ? '' : 'line-clamp-3',
                     ].join(' ')}
                   >
-                    {details.description}
+                    <DescriptionText
+                      text={details.description}
+                      runs={details.description_runs}
+                      videoId={videoId}
+                    />
                   </p>
                   <button
                     type="button"
@@ -413,17 +430,23 @@ export function WatchView({ videoId, startAtMs }: WatchViewProps): React.ReactNo
       <aside className="@[1066px]:w-[402px] w-full shrink-0">
         <h2 className="text-text mb-3 text-base font-medium">{t.t('video.related')}</h2>
         {relatedItems.length > 0 ? (
-          <VideoGrid>
-            {/* The rail is a fixed 402px column, so a portrait card is told its width explicitly:
-                left to the grid it would be more than twice as tall as the landscape ones. */}
-            {relatedItems.map((item) =>
-              isPortraitVideo(item) ? (
-                <ShortsCard key={item.id} video={item} width={168} />
-              ) : (
-                <VideoCard key={item.id} video={item} width={168} />
-              ),
+          // A list, as the site's is: a small thumbnail with the text beside it. Full cards showed
+          // three videos to a screen beside the player; rows show eight or nine.
+          <div className="flex flex-col gap-2">
+            {relatedVideos.map((item, index) => (
+              <Fragment key={item.id}>
+                {/* Shorts gathered into one shelf a few rows down, where the site puts them,
+                    rather than portrait cards three times the height of a row. */}
+                {index === SHORTS_AFTER_ROWS && relatedShorts.length > 0 && (
+                  <RelatedShorts shorts={relatedShorts} />
+                )}
+                <VideoCard video={item} width={168} layout="row" />
+              </Fragment>
+            ))}
+            {relatedVideos.length <= SHORTS_AFTER_ROWS && relatedShorts.length > 0 && (
+              <RelatedShorts shorts={relatedShorts} />
             )}
-          </VideoGrid>
+          </div>
         ) : related.error ? (
           // A failure, said so, with a way out of it. The rail used to show skeletons for every
           // outcome that was not a list — so a failed fetch and a video with no recommendations
@@ -440,5 +463,136 @@ export function WatchView({ videoId, startAtMs }: WatchViewProps): React.ReactNo
         )}
       </aside>
     </div>
+  );
+}
+
+/** The related Shorts, as one small shelf inside the list beside the player. */
+function RelatedShorts({ shorts }: { shorts: readonly VideoSummary[] }): ReactNode {
+  const t = useTranslation();
+  return (
+    <section className="py-2">
+      <h3 className="text-text mb-2 flex items-center gap-2 text-sm font-medium">
+        <Clapperboard size={18} strokeWidth={2} />
+        {t.t('shorts.title')}
+      </h3>
+      <ShortsShelf>
+        {shorts.map((item) => (
+          <div key={item.id} className="shrink-0 snap-start">
+            <ShortsCard video={item} width={120} />
+          </div>
+        ))}
+      </ShortsShelf>
+    </section>
+  );
+}
+
+/**
+ * A description with its addresses, timestamps and hashtags made into links, as on the site.
+ *
+ * Addresses on the site open here — a video, at its start time if the link has one, or a channel —
+ * and the rest open in the viewer's browser. A timestamp moves this video's playhead and brings the
+ * player into view; a hashtag searches for it.
+ */
+function DescriptionText({
+  text,
+  runs,
+  videoId,
+}: {
+  text: string;
+  runs: DescriptionRun[] | undefined;
+  videoId: VideoId;
+}): ReactNode {
+  const link = 'text-accent hover:underline underline-offset-2';
+  const parts =
+    runs !== undefined && runs.length > 0 ? partsFromRuns(runs, videoId) : parseDescription(text);
+  return (
+    <>
+      {parts.map((part, index) => {
+        switch (part.kind) {
+          case 'text':
+            return part.text;
+          case 'link':
+            return (
+              // A button, not an anchor: the webview must never navigate away from the
+              // application. The address is checked again on the native side.
+              <button
+                key={index}
+                type="button"
+                title={part.url}
+                className={`${link} break-all`}
+                onClick={() => {
+                  void invoke('open_external', { url: part.url }).catch(() => {
+                    // Refused, which is the outcome the native check exists to produce.
+                  });
+                }}
+              >
+                {part.text}
+              </button>
+            );
+          case 'video':
+            if (part.videoId === videoId && part.startAtMs !== undefined) {
+              const positionMs = part.startAtMs;
+              return (
+                <button
+                  key={index}
+                  type="button"
+                  className={`${link} break-all`}
+                  onClick={() => {
+                    const store = usePlayerStore.getState();
+                    store.requestSeek(positionMs);
+                    store.slot?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                  }}
+                >
+                  {part.text}
+                </button>
+              );
+            }
+            return (
+              <Link
+                key={index}
+                to={{
+                  name: 'watch',
+                  videoId: part.videoId,
+                  ...(part.startAtMs !== undefined ? { startAtMs: part.startAtMs } : {}),
+                }}
+                className={`${link} break-all`}
+              >
+                {part.text}
+              </Link>
+            );
+          case 'channel':
+            return (
+              <Link
+                key={index}
+                to={{ name: 'channel', channelId: part.channelId, tab: 'videos' }}
+                className={`${link} break-all`}
+              >
+                {part.text}
+              </Link>
+            );
+          case 'time':
+            return (
+              <button
+                key={index}
+                type="button"
+                className={link}
+                onClick={() => {
+                  const store = usePlayerStore.getState();
+                  store.requestSeek(part.positionMs);
+                  store.slot?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                }}
+              >
+                {part.text}
+              </button>
+            );
+          case 'hashtag':
+            return (
+              <Link key={index} to={{ name: 'search', query: part.text }} className={link}>
+                {part.text}
+              </Link>
+            );
+        }
+      })}
+    </>
   );
 }

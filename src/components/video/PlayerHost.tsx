@@ -139,6 +139,7 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
   const session = usePlayerStore((state) => state.session);
   const slot = usePlayerStore((state) => state.slot);
   const videoId = usePlayerStore((state) => state.lastVideoId);
+  const seekRequest = usePlayerStore((state) => state.seekRequest);
   // Bounds `auto` only. A tier chosen by hand in the menu below is honoured as given.
   const maxAutoQuality = useSettingsStore((state) => state.settings.playback.max_quality);
   // Preferences the settings screen has always persisted. Until now nothing read them, so each of
@@ -479,6 +480,13 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
       clearTimeout(timer);
     };
   }, [videoId]);
+
+  // A timestamp clicked elsewhere on the page: there, and playing, as on the site.
+  useEffect(() => {
+    if (seekRequest === null) return;
+    playerRef.current?.seek(seekRequest.positionMs);
+    playerRef.current?.play();
+  }, [seekRequest]);
 
   // The document is the authority on fullscreen, so it is the thing we listen to.
   useEffect(() => {

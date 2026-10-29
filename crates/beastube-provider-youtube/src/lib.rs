@@ -810,6 +810,7 @@ impl VideoProvider for YouTubeProvider {
         let mut video = VideoDetails {
             summary,
             description: Some(details.description.to_plaintext()),
+            description_runs: map::description_runs(&details.description),
             channel_avatar: map::thumbnails(&channel.avatar),
             channel_subscriber_count: channel.subscriber_count,
             like_count: details.like_count.map(u64::from),

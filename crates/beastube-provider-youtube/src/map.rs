@@ -19,7 +19,8 @@ use beastube_core::model::channel::{ChannelLink, ChannelSummary};
 use beastube_core::model::playlist::PlaylistSummary;
 use beastube_core::model::thumbnail::{Thumbnail, ThumbnailSet};
 use beastube_core::model::video::{
-    AudioTrack, CaptionTrack, Chapter, Cue, LiveStatus, VideoDetails, VideoSummary,
+    AudioTrack, CaptionTrack, Chapter, Cue, DescriptionLink, DescriptionRun, LiveStatus,
+    VideoDetails, VideoSummary,
 };
 use beastube_core::time_util::Timestamp;
 use rustypipe::model::{
@@ -494,6 +495,8 @@ pub(crate) fn details_from_player(
             is_short,
         },
         description: details.description.clone(),
+        // The player's description is plain text: no runs to carry.
+        description_runs: Vec::new(),
         channel_avatar: ThumbnailSet::empty(),
         channel_subscriber_count: None,
         like_count: None,
@@ -504,6 +507,53 @@ pub(crate) fn details_from_player(
         is_unlisted: false,
         is_age_restricted: false,
     })
+}
+
+/// The description as runs with their links, as the provider displays it.
+///
+/// Read from the extractor's rich text rather than its plain-text rendering, which writes every
+/// link out as its target: a chapter line that reads `4:27` on the site arrived as a full watch
+/// address, and a mention that reads `@name` as a channel address.
+pub(crate) fn description_runs(
+    text: &rustypipe::model::richtext::RichText,
+) -> Vec<DescriptionRun> {
+    use rustypipe::model::UrlTarget;
+    use rustypipe::model::richtext::TextComponent;
+
+    text.0
+        .iter()
+        .map(|component| match component {
+            TextComponent::Web { text, url } => DescriptionRun {
+                text: text.clone(),
+                link: Some(DescriptionLink::Web { url: url.clone() }),
+            },
+            TextComponent::YouTube { text, target } => {
+                let link = match target {
+                    UrlTarget::Video { id, start_time } => {
+                        VideoId::new(id.clone()).ok().map(|video_id| DescriptionLink::Video {
+                            video_id,
+                            start_ms: (*start_time > 0).then(|| u64::from(*start_time) * 1000),
+                        })
+                    }
+                    UrlTarget::Channel { id } => ChannelId::new(id.clone())
+                        .ok()
+                        .map(|channel_id| DescriptionLink::Channel { channel_id }),
+                    // Playlists and the rest have no screen here yet, so they open on the site.
+                    other => Some(DescriptionLink::Web {
+                        url: other.to_url(),
+                    }),
+                };
+                DescriptionRun {
+                    text: text.clone(),
+                    link,
+                }
+            }
+            other => DescriptionRun {
+                text: other.get_text().to_owned(),
+                link: None,
+            },
+        })
+        .collect()
 }
 
 /// Converts the extractor's subtitle list into caption tracks.
@@ -940,6 +990,42 @@ mod tests {
         assert_eq!(showing(&cues, 100), ["a"]);
         assert_eq!(showing(&cues, 600), ["a b c"]);
         assert_eq!(cues.len(), 2);
+    }
+
+    #[test]
+    fn a_description_keeps_its_links_under_the_text_the_site_shows() {
+        // A chapter line, a mention, a web link and plain text, shaped as the extractor types them.
+        let text: rustypipe::model::richtext::RichText = from_json(serde_json::json!([
+            { "YouTube": { "text": "4:27", "target": {
+                "Video": { "id": "2sgstdA4a50", "start_time": 267 } } } },
+            { "Text": { "text": " - The spark
+With " } },
+            { "YouTube": { "text": "@SueBird", "target": {
+                "Channel": { "id": "UC9ZTAQ3Fv9uZt0RGCsbdmdA" } } } },
+            { "Text": { "text": " on " } },
+            { "Web": {
+                "text": "open.spotify.com/show/76CW...",
+                "url": "https://open.spotify.com/show/76CWtQ" } },
+        ]));
+        let runs = description_runs(&text);
+
+        assert_eq!(runs[0].text, "4:27", "the text the site shows, not the watch address");
+        assert_eq!(
+            runs[0].link,
+            Some(DescriptionLink::Video {
+                video_id: VideoId::new("2sgstdA4a50").expect("valid"),
+                start_ms: Some(267_000),
+            })
+        );
+        assert_eq!(runs[1].link, None);
+        assert_eq!(runs[2].text, "@SueBird");
+        assert!(matches!(runs[2].link, Some(DescriptionLink::Channel { .. })));
+        assert_eq!(
+            runs[4].link,
+            Some(DescriptionLink::Web {
+                url: "https://open.spotify.com/show/76CWtQ".to_owned()
+            })
+        );
     }
 
     #[test]

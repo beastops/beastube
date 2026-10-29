@@ -80,6 +80,9 @@ export const ShortsCard = memo(function ShortsCard({
         // The vertical player, not the watch page. A short opened in a landscape frame is the same
         // bug as a short rendered on a landscape card.
         to={{ name: 'shorts', videoId: video.id }}
+        // The title is the link a keyboard reaches; this is the pointer's way to the same place.
+        tabIndex={-1}
+        aria-hidden="true"
         className="bg-surface relative block overflow-hidden rounded-xl"
         style={{ aspectRatio: '9 / 16' }}
       >
@@ -109,7 +112,15 @@ export const ShortsCard = memo(function ShortsCard({
       </Link>
 
       <div className="flex min-w-0 flex-col gap-0.5">
-        <h3 className="text-text line-clamp-2 text-sm leading-snug font-medium">{video.title}</h3>
+        <h3 className="text-text line-clamp-2 text-sm leading-snug font-medium">
+          <Link
+            to={{ name: 'shorts', videoId: video.id }}
+            title={video.title}
+            className="focus-visible:underline"
+          >
+            {video.title}
+          </Link>
+        </h3>
         {video.view_count !== undefined && (
           <span className="text-text-muted text-xs">
             {t.plural('video.views', video.view_count, { count: t.compact(video.view_count) })}

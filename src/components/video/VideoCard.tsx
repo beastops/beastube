@@ -15,7 +15,7 @@
  */
 
 import { BadgeCheck } from 'lucide-react';
-import { memo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { memo, useCallback, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 
 import { Link } from '@/app/router';
 import { CardMenu } from '@/components/video/CardMenu';
@@ -77,6 +77,11 @@ interface VideoCardProps {
    * from a list it is not in.
    */
   onRemoveFromHistory?: (() => void) | undefined;
+  /**
+   * `grid` for a feed; `row` for the compact list beside the player, where the site puts a small
+   * thumbnail with the text beside it rather than a full card that shows three to a screen.
+   */
+  layout?: 'grid' | 'row';
 }
 
 /**
@@ -91,7 +96,9 @@ export const VideoCard = memo(function VideoCard({
   width = 360,
   progress,
   onRemoveFromHistory,
+  layout = 'grid',
 }: VideoCardProps): ReactNode {
+  const row = layout === 'row';
   const t = useTranslation();
   const [thumbnailFailed, setThumbnailFailed] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -123,7 +130,7 @@ export const VideoCard = memo(function VideoCard({
 
   return (
     <article
-      className="group card-glow feed-card flex flex-col gap-3"
+      className={`group card-glow feed-card flex ${row ? 'gap-2' : 'flex-col gap-3'}`}
       data-glow={hovered && glow !== null ? 'on' : undefined}
       style={glow !== null ? ({ '--card-glow-color': glow } as CSSProperties) : undefined}
       // Hover is the best signal but not the only one, and it is unavailable to half the ways a
@@ -161,11 +168,16 @@ export const VideoCard = memo(function VideoCard({
     >
       <Link
         to={{ name: 'watch', videoId: video.id }}
-        className="relative block overflow-hidden rounded-md"
+        // The title below is the link a keyboard reaches and a screen reader announces; this one
+        // is the same destination for the pointer, and a second stop per card would double the
+        // length of every grid's tab order.
+        tabIndex={-1}
+        aria-hidden="true"
+        className={`relative block overflow-hidden ${row ? 'shrink-0 rounded-lg' : 'rounded-md'}`}
         // The box holds its shape before the image arrives, which is what prevents layout shift.
         // A hovered card lifts its corners the way YouTube's does, so the preview reads as the card
         // coming forward rather than as an unrelated frame appearing.
-        style={{ aspectRatio: '16 / 9' }}
+        style={row ? { width, aspectRatio: '16 / 9' } : { aspectRatio: '16 / 9' }}
       >
         {showImage ? (
           <LazyImage
@@ -193,7 +205,8 @@ export const VideoCard = memo(function VideoCard({
           <div className="bg-surface size-full" aria-hidden="true" />
         )}
 
-        <HoverPreview videoId={video.id} active={hovered} />
+        {/* Not in a row: a preview the size of a stamp is all cost and no picture. */}
+        {!row && <HoverPreview videoId={video.id} active={hovered} />}
 
         {/* Both stay on top of the preview: the duration is still true while it plays, and losing
             the progress bar on hover would hide the one thing that says you have seen this. */}
@@ -204,8 +217,8 @@ export const VideoCard = memo(function VideoCard({
       {/* The avatar sits beside the text block rather than above it, which is the arrangement
           YouTube uses and the reason its cards read as one unit: the picture anchors the left edge
           and the three lines of text hang off it. */}
-      <div className="flex min-w-0 gap-3">
-        {avatar && (
+      <div className={`flex min-w-0 ${row ? 'flex-1' : 'gap-3'}`}>
+        {!row && avatar && (
           <Link
             to={
               video.channel_id
@@ -230,8 +243,18 @@ export const VideoCard = memo(function VideoCard({
 
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex min-w-0 items-start gap-1">
-            <h3 className="text-text line-clamp-2 min-w-0 flex-1 text-base leading-snug font-medium">
-              {video.title}
+            <h3
+              className={`text-text line-clamp-2 min-w-0 flex-1 leading-snug font-medium ${row ? 'text-sm' : 'text-base'}`}
+            >
+              {/* The title opens the video, as it does on the site. Only the thumbnail did, so the
+                  line of text everyone reaches for first did nothing. */}
+              <Link
+                to={{ name: 'watch', videoId: video.id }}
+                title={video.title}
+                className="focus-visible:underline"
+              >
+                {video.title}
+              </Link>
             </h3>
             {/* Beside the title, as YouTube places it. Hidden until the card is hovered, so a grid
                 is not forty dots. */}
@@ -283,6 +306,43 @@ export function VideoCardSkeleton(): ReactNode {
       </div>
     </div>
   );
+}
+
+/** The narrowest a card column may be, in CSS pixels. Mirrors `VideoGrid`'s track minimum. */
+const CARD_MIN_PX = 280;
+
+/** The gap between card columns, in CSS pixels. Mirrors `VideoGrid`'s `gap-x-4`. */
+const CARD_GAP_PX = 16;
+
+/**
+ * How many columns {@link VideoGrid} lays out at the width of the element the ref is put on.
+ *
+ * The grid decides this itself, in CSS, and that is enough for a plain grid. A screen that cuts its
+ * feed into rows between shelves has to know it too: cut every six videos, a five-column window —
+ * which is what a maximised 1080p screen gives — showed a lone card on a row of its own before
+ * every shelf. This is the same arithmetic `auto-fill` performs.
+ *
+ * Measured from a callback ref, so the first value is known before the first paint rather than
+ * one frame after it.
+ */
+export function useGridColumns(): [(element: HTMLElement | null) => void, number] {
+  const [columns, setColumns] = useState(4);
+  const observer = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((element: HTMLElement | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
+    if (!element) return;
+    const measure = () => {
+      const width = element.clientWidth;
+      if (width <= 0) return;
+      const count = Math.max(1, Math.floor((width + CARD_GAP_PX) / (CARD_MIN_PX + CARD_GAP_PX)));
+      setColumns((was) => (was === count ? was : count));
+    };
+    measure();
+    observer.current = new ResizeObserver(measure);
+    observer.current.observe(element);
+  }, []);
+  return [ref, columns];
 }
 
 /** The responsive grid YouTube uses for video cards. */

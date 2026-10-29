@@ -195,6 +195,46 @@ pub struct AudioTrack {
     pub is_original: bool,
 }
 
+/// One run of a description: its text as the provider displays it, and where it leads when it is a
+/// link.
+///
+/// Carried as runs because the description's links are not in its text. A chapter line reads `4:27`
+/// on the site and links to this video at that second; a mention reads `@name` and links to a
+/// channel. Flattened to text, those became the link targets — a full watch URL at the start of
+/// every chapter line, a channel URL in place of every mention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescriptionRun {
+    /// What the provider displays. Untrusted text; rendered as text, never as HTML.
+    pub text: String,
+    /// Where the run leads, when it is a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<DescriptionLink>,
+}
+
+/// Where a description link leads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DescriptionLink {
+    /// An address off the provider, for the viewer's browser. Validated again before it is opened.
+    Web {
+        /// The address, with the provider's redirect wrapper already removed.
+        url: String,
+    },
+    /// A video on the provider, at a start time when the link names one.
+    Video {
+        /// The video.
+        video_id: VideoId,
+        /// Where to start, in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_ms: Option<u64>,
+    },
+    /// A channel on the provider.
+    Channel {
+        /// The channel.
+        channel_id: ChannelId,
+    },
+}
+
 /// The full shape used by the watch page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoDetails {
@@ -205,6 +245,10 @@ pub struct VideoDetails {
     /// rendered from provider-supplied HTML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The description again, as runs with their links, when the provider has them. Empty when it
+    /// only has text, which is then the whole of what there is to show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub description_runs: Vec<DescriptionRun>,
     /// Channel avatar renditions.
     #[serde(default, skip_serializing_if = "ThumbnailSet::is_empty")]
     pub channel_avatar: ThumbnailSet,
@@ -297,6 +341,7 @@ mod tests {
                 ..VideoSummary::placeholder(VideoId::new("dQw4w9WgXcQ").unwrap(), "Test")
             },
             description: None,
+            description_runs: Vec::new(),
             channel_avatar: ThumbnailSet::empty(),
             channel_subscriber_count: None,
             like_count: None,

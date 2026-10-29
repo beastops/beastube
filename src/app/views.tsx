@@ -26,7 +26,12 @@ import {
   ShortsGrid,
   ShortsShelf,
 } from '@/components/video/ShortsCard';
-import { VideoCard, VideoCardSkeleton, VideoGrid } from '@/components/video/VideoCard';
+import {
+  useGridColumns,
+  VideoCard,
+  VideoCardSkeleton,
+  VideoGrid,
+} from '@/components/video/VideoCard';
 import { WatchView } from '@/components/video/WatchView';
 import { useAsyncResource } from '@/hooks/useAsyncResource';
 import type { TranslationKey } from '@/i18n';
@@ -90,11 +95,14 @@ const HOME_SHORTS_COUNT = 16;
  */
 const BANNER_ASPECT = '2560 / 424';
 
-/** Videos shown before the first Shorts shelf breaks the grid. */
-const VIDEOS_BEFORE_SHELF = 6;
-
-/** Videos between one shelf and the next. */
-const VIDEOS_BETWEEN_SHELVES = 9;
+/**
+ * Rows of videos before the first Shorts shelf breaks the grid, and between one shelf and the next.
+ *
+ * Rows, not videos: the grid's column count follows the window, and a fixed count of videos left a
+ * part-filled row before every shelf at most widths.
+ */
+const ROWS_BEFORE_SHELF = 2;
+const ROWS_BETWEEN_SHELVES = 3;
 
 /** Shorts in each shelf. */
 const SHORTS_PER_SHELF = 8;
@@ -310,7 +318,12 @@ function HomeView(): ReactNode {
     { navigation: true },
   );
 
-  const continueWatching = resumable.data ?? [];
+  const [measureGrid, columns] = useGridColumns();
+  const videosBeforeShelf = columns * ROWS_BEFORE_SHELF;
+  const videosBetweenShelves = columns * ROWS_BETWEEN_SHELVES;
+  // One row, as a shelf is: twelve resumable videos wrapped into three and a lone fourth. The rest
+  // are a click away in History.
+  const continueWatching = (resumable.data ?? []).slice(0, Math.max(2, columns));
   const recentlyWatched = recent.data ?? [];
   // The grid stays landscape and the portrait ones move to the shelf, which is how YouTube's home
   // is arranged and is also what keeps grid rows from being sized by a card twice their height.
@@ -341,12 +354,12 @@ function HomeView(): ReactNode {
   // Alternating blocks: a shelf of shorts, then a row of videos, repeated. Sliced here rather than
   // in the markup so the two lists are consumed in step and neither repeats an item.
   const shelfBreaks: { shorts: VideoSummary[]; videos: VideoSummary[] }[] = [];
-  for (let cursor = VIDEOS_BEFORE_SHELF, shelfCursor = 0; cursor < recommendedAll.length;) {
+  for (let cursor = videosBeforeShelf, shelfCursor = 0; cursor < recommendedAll.length;) {
     shelfBreaks.push({
       shorts: shortsShelf.slice(shelfCursor, shelfCursor + SHORTS_PER_SHELF),
-      videos: suggestions.slice(cursor, cursor + VIDEOS_BETWEEN_SHELVES),
+      videos: suggestions.slice(cursor, cursor + videosBetweenShelves),
     });
-    cursor += VIDEOS_BETWEEN_SHELVES;
+    cursor += videosBetweenShelves;
     shelfCursor += SHORTS_PER_SHELF;
     if (shelfCursor >= shortsShelf.length && cursor >= suggestions.length) break;
   }
@@ -377,7 +390,8 @@ function HomeView(): ReactNode {
   }
 
   return (
-    <>
+    // A plain wrapper, measured so the feed can be cut into whole rows of the grid it lays out.
+    <div ref={measureGrid}>
       {continueWatching.length > 0 && (
         <FeedSection heading={t.t('home.continueWatching')}>
           {continueWatching.map((entry) => (
@@ -407,7 +421,7 @@ function HomeView(): ReactNode {
 
       {suggestions.length > 0 && (
         <FeedSection heading={t.t(feedHeading)}>
-          {suggestions.slice(0, VIDEOS_BEFORE_SHELF).map((video) => (
+          {suggestions.slice(0, videosBeforeShelf).map((video) => (
             <FeedCard key={video.id} video={video} />
           ))}
         </FeedSection>
@@ -419,7 +433,7 @@ function HomeView(): ReactNode {
           the single most jarring thing a feed can do. */}
       {suggestions.length === 0 && recommended.loading && (
         <FeedSection heading={t.t('home.recommended')}>
-          {Array.from({ length: VIDEOS_BEFORE_SHELF }, (_, index) => (
+          {Array.from({ length: videosBeforeShelf }, (_, index) => (
             <VideoCardSkeleton key={index} />
           ))}
         </FeedSection>
@@ -501,7 +515,7 @@ function HomeView(): ReactNode {
           </ShortsShelf>
         </section>
       )}
-    </>
+    </div>
   );
 }
 

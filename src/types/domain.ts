@@ -260,9 +260,24 @@ export interface AudioTrack {
   is_original?: boolean;
 }
 
+/** Where a link in a description leads. */
+export type DescriptionLink =
+  | { kind: 'web'; url: string }
+  | { kind: 'video'; video_id: VideoId; start_ms?: number }
+  | { kind: 'channel'; channel_id: ChannelId };
+
+/** One run of a description: its text as the provider shows it, and its link, if it has one. */
+export interface DescriptionRun {
+  /** Untrusted text. Rendered as text, never as HTML. */
+  text: string;
+  link?: DescriptionLink;
+}
+
 /** The full shape used by the watch page. Flattens {@link VideoSummary} on the wire. */
 export interface VideoDetails extends VideoSummary {
   description?: string;
+  /** The description as runs with their links, when the provider has them. */
+  description_runs?: DescriptionRun[];
   channel_avatar?: ThumbnailSet;
   channel_subscriber_count?: number;
   like_count?: number;

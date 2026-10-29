@@ -35,7 +35,8 @@ pub use search::{
 pub use stream::{AudioCodec, AudioStream, ByteRange, Quality, StreamSet, VideoCodec, VideoStream};
 pub use thumbnail::{Thumbnail, ThumbnailSet};
 pub use video::{
-    AudioTrack, CaptionTrack, Chapter, Cue, LiveStatus, VideoDetails, VideoSummary,
+    AudioTrack, CaptionTrack, Chapter, Cue, DescriptionLink, DescriptionRun, LiveStatus,
+    VideoDetails, VideoSummary,
 };
 
 use serde::{Deserialize, Deserializer, Serialize};

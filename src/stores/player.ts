@@ -115,18 +115,29 @@ interface PlayerState {
    * view's.
    */
   slot: HTMLElement | null;
+  /**
+   * A position asked for from outside the player — a timestamp in a description.
+   *
+   * Numbered, so asking for the same position twice still moves the playhead the second time.
+   */
+  seekRequest: { positionMs: number; id: number } | null;
   setSession: (session: PlayerSession | null) => void;
   setSlot: (slot: HTMLElement | null) => void;
+  requestSeek: (positionMs: number) => void;
 }
 
 export const usePlayerStore = create<PlayerState>((set) => ({
   session: null,
   lastVideoId: null,
   slot: null,
+  seekRequest: null,
   setSession: (session) => {
     set(session === null ? { session } : { session, lastVideoId: session.videoId });
   },
   setSlot: (slot) => {
     set({ slot });
+  },
+  requestSeek: (positionMs) => {
+    set((state) => ({ seekRequest: { positionMs, id: (state.seekRequest?.id ?? 0) + 1 } }));
   },
 }));
