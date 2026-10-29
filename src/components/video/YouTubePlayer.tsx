@@ -814,7 +814,7 @@ export function YouTubePlayer({
     const target = frame?.contentWindow;
     if (!frame || !target) return;
     try {
-      target.postMessage({ beastube: 'audio', ...message }, new URL(frame.src).origin);
+      target.postMessage(message, new URL(frame.src).origin);
     } catch {
       // A frame mid-navigation has no usable address yet; the next state change asks again.
     }
@@ -1110,6 +1110,9 @@ export function YouTubePlayer({
             // inconsistently once the player is constructed programmatically, and a short that does
             // not start shows the embed's poster chrome — its title bar and a play button — which
             // is the single most visible defect on the Shorts surface.
+            // The embed's own captions kept off the picture while the application draws its own.
+            tellBridge({ beastube: 'captions', show: embedCaptionsNow() });
+
             // The viewer's volume before anything plays. The embed keeps its own memory of the last
             // volume, which is not the viewer's setting and is usually not what this application
             // last showed.
@@ -1172,7 +1175,12 @@ export function YouTubePlayer({
             // not instantly; see `SETTLE_DELAY_MS`.
             if (event.data === EMBED_STATE.playing) scheduleSettle();
             // The track list exists only once the media has loaded, which playing proves.
-            if (event.data === EMBED_STATE.playing) tellBridge({ action: 'list' });
+            if (event.data === EMBED_STATE.playing) {
+              tellBridge({ beastube: 'audio', action: 'list' });
+              // Again on every start: a frame that has navigated to its next video is a new
+              // document, and the rule has to be in it.
+              tellBridge({ beastube: 'captions', show: embedCaptionsNow() });
+            }
             reportState(toPlaybackState(event.data));
             // Sample immediately on transition so a pause records its exact position rather than
             // waiting up to a poll interval.
@@ -1454,6 +1462,14 @@ export function YouTubePlayer({
     applyMuted(muted);
   }, [muted]);
 
+  // The embed's own captions follow the control-bar setting at once, not from the next video.
+  const sendCaptionRule = useEffectEvent(() => {
+    tellBridge({ beastube: 'captions', show: embedCaptions });
+  });
+  useEffect(() => {
+    sendCaptionRule();
+  }, [embedCaptions]);
+
   // Effect 4 — resume. WatchView resolves a stored position asynchronously, so `startAtMs` almost
   // always arrives *after* the first render; rebuilding on it restarted playback from zero on every
   // partly-watched video, which is the default configuration.
@@ -1697,7 +1713,7 @@ export function YouTubePlayer({
         // The id is the provider's, which is the embed's own `audioTrack.id`; the language is the
         // bridge's fallback for a track the two sides number differently. A choice made before
         // the media has loaded waits in the bridge for the list to exist.
-        tellBridge({ action: 'set', id, language: languageCode ?? id });
+        tellBridge({ beastube: 'audio', action: 'set', id, language: languageCode ?? id });
       },
       hasCaptions: () => captionModule() !== null,
       setCaptions: (enabled: boolean) => {

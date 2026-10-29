@@ -588,6 +588,11 @@ pub(crate) fn caption_tracks(subtitles: Vec<rustypipe::model::Subtitle>) -> Vec<
 /// neighbour, so nearly every line arrived late. Each word-timed event therefore becomes a run of
 /// cues that grow a word at a time, and overlapping cues are left overlapping for the drawer to
 /// stack.
+///
+/// Styled tracks send every line twice — the same text at the same moment in two pens, an outline
+/// and a fill that the site lays one on top of the other — and pad the text with zero-width spaces
+/// so its band sits away from the letters. Drawn as they arrive, each line appeared twice, one
+/// under the other. The second copy is dropped and the padding trimmed.
 pub(crate) fn cues_from_json3(json: &str) -> Vec<Cue> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
@@ -600,7 +605,21 @@ pub(crate) fn cues_from_json3(json: &str) -> Vec<Cue> {
     // Stable, so the pieces of one line keep their order; lines already arrive in time order, but
     // the drawer relies on it rather than hoping.
     cues.sort_by_key(|cue| cue.start_ms);
+    let mut seen = std::collections::HashSet::new();
+    cues.retain(|cue| seen.insert((cue.start_ms, cue.end_ms, cue.text.clone())));
     cues
+}
+
+/// Whether a character is padding rather than text: whitespace, or the zero-width spaces styled
+/// tracks put around their words.
+fn is_padding(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '\u{200b}' | '\u{feff}')
+}
+
+/// A line's text without the padding at either end. Inside the line it stays: in Thai, which has
+/// no spaces, a zero-width space is where a line may wrap.
+fn clean_caption(text: &str) -> String {
+    text.trim_matches(is_padding).to_owned()
 }
 
 /// The cues one `json3` event contributes: none, one, or one per word.
@@ -608,6 +627,10 @@ fn event_cues(event: &serde_json::Value) -> Vec<Cue> {
     let Some(start) = event.get("tStartMs").and_then(serde_json::Value::as_u64) else {
         return Vec::new();
     };
+    // A segment with no offset of its own belongs to the moment of the one before it. Styled tracks
+    // end a timed line with an untimed scrap of padding; read as "at the start", it put the whole
+    // line on screen from its first word, over the words still arriving.
+    let mut latest = 0;
     let segments: Vec<(u64, &str)> = event
         .get("segs")
         .and_then(serde_json::Value::as_array)
@@ -619,13 +642,17 @@ fn event_cues(event: &serde_json::Value) -> Vec<Cue> {
                     let offset = segment
                         .get("tOffsetMs")
                         .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
+                        .map_or(latest, |offset| offset.max(latest));
+                    latest = offset;
                     Some((offset, text))
                 })
                 .collect()
         })
         .unwrap_or_default();
-    if segments.iter().all(|(_, text)| text.trim().is_empty()) {
+    if segments
+        .iter()
+        .all(|(_, text)| text.chars().all(is_padding))
+    {
         return Vec::new();
     }
 
@@ -639,10 +666,11 @@ fn event_cues(event: &serde_json::Value) -> Vec<Cue> {
             .max(MIN_CUE_MS);
 
     if segments.iter().all(|(offset, _)| *offset == 0) {
+        let whole: String = segments.iter().map(|(_, text)| *text).collect();
         return vec![Cue {
             start_ms: start,
             end_ms: end,
-            text: segments.iter().map(|(_, text)| *text).collect(),
+            text: clean_caption(&whole),
         }];
     }
 
@@ -655,28 +683,39 @@ fn event_cues(event: &serde_json::Value) -> Vec<Cue> {
         if from >= end {
             // Timed past the end of its own line: shown with the words before it rather than never.
             if let Some(last) = cues.last_mut() {
-                last.text.clone_from(&text);
+                last.text = clean_caption(&text);
             }
             continue;
         }
         let until = segments
             .get(index + 1)
             .map_or(end, |(next, _)| (start + next).min(end));
-        // A word sharing its offset with the next one simply arrives with it.
-        if until <= from || text.trim().is_empty() {
+        // A word sharing its offset with the next one simply arrives with it, and padding alone is
+        // not a word.
+        let shown = clean_caption(&text);
+        if until <= from || shown.is_empty() {
+            continue;
+        }
+        // Padding that changes nothing on screen extends the cue showing rather than starting a
+        // one-millisecond copy of it.
+        if let Some(last) = cues.last_mut()
+            && last.text == shown
+            && last.end_ms >= from
+        {
+            last.end_ms = last.end_ms.max(until);
             continue;
         }
         cues.push(Cue {
             start_ms: from,
             end_ms: until,
-            text: text.clone(),
+            text: shown,
         });
     }
     if cues.is_empty() {
         cues.push(Cue {
             start_ms: start,
             end_ms: end,
-            text,
+            text: clean_caption(&text),
         });
     }
     cues
@@ -962,6 +1001,36 @@ mod tests {
         let cues = cues_from_json3(&rolling_track());
         assert!(cues.iter().all(|cue| !cue.text.trim().is_empty()));
         assert!(cues.windows(2).all(|pair| pair[0].start_ms <= pair[1].start_ms));
+    }
+
+    #[test]
+    fn a_styled_line_sent_in_two_pens_is_shown_once_without_its_padding() {
+        // From a real styled track (`RE3_PGwDwhw`, English): every line arrives twice, an outline
+        // pen and a fill pen at the same moment, with zero-width spaces around the words.
+        let line = |pen: u64| {
+            serde_json::json!({ "tStartMs": 9434, "dDurationMs": 1800, "segs": [
+                { "utf8": "\u{200b}", "pPenId": 1 }, { "utf8": "\u{200b}" },
+                { "utf8": "\u{200b} \u{200b}ANYONE ", "pPenId": pen },
+                { "utf8": "in ", "pPenId": pen, "tOffsetMs": 380 },
+                { "utf8": "their\u{200b} \u{200b}", "pPenId": pen, "tOffsetMs": 700 },
+                { "utf8": "\u{200b}", "pPenId": 1, "tOffsetMs": 701 },
+                { "utf8": "\n", "pPenId": 1, "tOffsetMs": 702 },
+                { "utf8": "family", "pPenId": pen, "tOffsetMs": 900 },
+                // The untimed scrap of padding that ends every styled line.
+                { "utf8": "\u{200b}", "pPenId": 1 },
+            ]})
+        };
+        let json = serde_json::json!({ "events": [line(3), line(4)] }).to_string();
+        let cues = cues_from_json3(&json);
+
+        assert_eq!(showing(&cues, 9500), ["ANYONE"], "once, not once per pen");
+        assert_eq!(showing(&cues, 9900), ["ANYONE in"]);
+        assert_eq!(showing(&cues, 10_200), ["ANYONE in their"]);
+        assert_eq!(showing(&cues, 10_400), ["ANYONE in their\u{200b} \u{200b}\u{200b}\nfamily"]);
+        assert!(
+            cues.windows(2).all(|pair| pair[0].end_ms <= pair[1].start_ms),
+            "one line, growing — never the finished line over the words still arriving"
+        );
     }
 
     #[test]

@@ -152,8 +152,10 @@ export function CaptionOverlay({
             transition: 'transform var(--duration-chrome) var(--ease-player-out)',
           }}
         >
-          {showing.map((cue) => (
-            <div key={`${String(cue.start_ms)}:${cue.text}`} className="max-w-full">
+          {showing.map((cue, line) => (
+            // By line, not by content: a track that sends the same line twice gave two siblings one
+            // key, and React then left lines behind on screen as the set changed.
+            <div key={line} className="max-w-full">
               <span
                 style={{
                   // The text's own line breaks are the caption author's; collapsing them made every

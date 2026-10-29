@@ -6,10 +6,15 @@
 // methods are, however, attached to the player element inside the embed's own document — which is
 // where this runs.
 //
+// It also keeps the embed's own captions off the picture while the application draws its own.
+// Unloading the embed's caption module from outside is not enough: the player turns captions back
+// on by itself — for a dubbed audio track, for one — and the picture then carried two sets.
+//
 // It is injected into every frame (WebView2 adds initialization scripts to child frames as well as
 // the page) and does nothing anywhere except YouTube's embed, and there only when that embed's
-// parent is this application. It answers two messages from that parent and no one else: `list`,
-// which reports the tracks and the one playing, and `set`, which switches.
+// parent is this application. It answers that parent and no one else: `audio` messages `list` the
+// tracks and the one playing, or `set` one; a `captions` message says whether the embed's own
+// captions may show.
 
 (() => {
   'use strict';
@@ -111,10 +116,29 @@
     report();
   };
 
+  /** Hides the embed's caption layer, or gives it back. */
+  const showEmbedCaptions = (show) => {
+    const existing = document.getElementById('beastube-captions');
+    if (show) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return;
+    const style = document.createElement('style');
+    style.id = 'beastube-captions';
+    style.textContent = '.ytp-caption-window-container{display:none!important}';
+    (document.head || document.documentElement).append(style);
+  };
+
   window.addEventListener('message', (event) => {
     if (event.source !== window.parent || event.origin !== parentOrigin) return;
     const data = event.data;
-    if (!data || typeof data !== 'object' || data.beastube !== 'audio') return;
+    if (!data || typeof data !== 'object') return;
+    if (data.beastube === 'captions' && typeof data.show === 'boolean') {
+      showEmbedCaptions(data.show);
+      return;
+    }
+    if (data.beastube !== 'audio') return;
     if (data.action === 'set' && typeof data.id === 'string') {
       wanted = {
         id: data.id,
