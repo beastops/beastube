@@ -283,25 +283,18 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
    */
   const [rates, setRates] = useState<number[]>([]);
   /**
-   * The audio tracks this video offers.
+   * What the embed reports about audio, held against the video it was read for: its tracks, and
+   * the one actually playing.
    *
-   * Named and counted by the provider, which read them from the video's own player response. The
-   * embed can switch tracks but the shape of its list is undocumented, so deriving the menu from
-   * it meant a field name changing upstream would make the row quietly disappear. The embed is
-   * still what performs the switch; it is simply not what decides whether there is one to offer.
-   *
+   * The list is only a fallback — the provider names the tracks, from the video's own player
+   * response. What is playing matters more: the embed picks a dub by itself when one matches the
+   * viewer's language, and a menu that assumed the original was playing checked the wrong row.
    * Most videos have a single track and get no row at all: one entry is not a choice.
-   */
-  /**
-   * What the embed reports, held against the video it was read for.
-   *
-   * Only a fallback. YouTube omits track information entirely from a video that has one audio
-   * track, so the provider has nothing to name for those — and the row would disappear on exactly
-   * the videos most people watch. The embed still names the one track it is playing.
    */
   const [embedAudio, setEmbedAudio] = useState<{
     videoId: string;
     tracks: { id: string; label: string; isDefault: boolean }[];
+    current: string | null;
   } | null>(null);
 
   const providerAudio = (session?.audioTracks ?? []).map((track) => ({
@@ -322,10 +315,16 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
    * video must not read as chosen on the next, which offers a different set entirely.
    */
   const [chosenAudio, setChosenAudio] = useState<{ videoId: string; id: string } | null>(null);
+  // What the embed says is playing, when it has said; then the pick still on its way; then the
+  // original.
+  const playingAudio = embedAudio?.videoId === videoId ? embedAudio.current : null;
   const audioTrack =
-    chosenAudio?.videoId === videoId
-      ? chosenAudio.id
-      : (audioTracks.find((track) => track.isDefault)?.id ?? null);
+    (playingAudio !== null && audioTracks.some((track) => track.id === playingAudio)
+      ? playingAudio
+      : null) ??
+    (chosenAudio?.videoId === videoId ? chosenAudio.id : null) ??
+    audioTracks.find((track) => track.isDefault)?.id ??
+    null;
   /**
    * The tier the viewer asked for, and the tiers this video has.
    *
@@ -822,6 +821,9 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
             // the one outcome worse than none.
             captionsByDefault={nativeControls && captionsByDefault}
             embedCaptions={nativeControls}
+            onAudioTracks={(tracks, current) => {
+              setEmbedAudio({ videoId, tracks, current });
+            }}
             {...(captionLanguage !== null ? { captionLanguage } : {})}
             // Left on `auto` under YouTube's controls: its gear sets the embed's own preference,
             // which overrides frame size entirely, so asking by size as well would be two hands on
@@ -830,6 +832,9 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
             quality={nativeControls ? 'auto' : quality}
             maxAutoQuality={maxAutoQuality}
             autoplay={session?.autoplay ?? false}
+            // Applied as the embed becomes ready, before it plays a sound.
+            volume={volume}
+            muted={muted}
             {...(session?.startAtMs !== undefined ? { startAtMs: session.startAtMs } : {})}
             onStateChange={(state, forId) => {
               setPlaying(state === 'playing' || state === 'buffering');
@@ -855,9 +860,6 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
               // Likewise the rates on offer: a new video resets them, and the menu must show what
               // is true rather than what the last video allowed.
               setRates(playerRef.current?.availableRates() ?? []);
-              // Only used when the provider named nothing; see `embedAudio`.
-              const embedTracks = playerRef.current?.audioTracks() ?? [];
-              if (embedTracks.length > 0) setEmbedAudio({ videoId, tracks: embedTracks });
               // The viewer's chosen speed is applied rather than read back. A new video resets the
               // embed to 1x, so without this the preference was overwritten on every video and the
               // settings slider changed nothing that could be observed.
@@ -1085,6 +1087,11 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                   audioTrack={audioTrack}
                   onAudioTrack={(next) => {
                     setChosenAudio({ videoId, id: next });
+                    // The embed's last report described the track being left; the pick shows until
+                    // the embed reports the switch.
+                    setEmbedAudio((was) =>
+                      was !== null && was.videoId === videoId ? { ...was, current: null } : was,
+                    );
                     const language = (session?.audioTracks ?? []).find(
                       (track) => track.id === next,
                     )?.language_code;

@@ -142,55 +142,40 @@ const QUALITY_ORDER: readonly Exclude<Quality, 'auto'>[] = [
   '360p',
 ];
 
-/**
- * The language part of a tag or a track id: `es` from `es-419`, `es.3` or `es`.
- *
- * Both sides encode the language differently — the provider appends a track index, the embed uses a
- * region subtag — and the language itself is the only part they agree on.
- */
-function baseLanguage(value: string): string {
-  return value.toLowerCase().split(/[.\-_]/)[0] ?? value.toLowerCase();
+/** One audio track as the bridge inside the embed reports it. */
+interface BridgeTrack {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+/** What the bridge reports: the tracks on offer, and the one playing. */
+interface BridgeAudio {
+  tracks: BridgeTrack[];
+  current: string | null;
 }
 
 /**
- * A stable identifier for one of the player's audio tracks.
+ * Whether a message is the bridge's audio report.
  *
- * The field carrying it differs between builds, so the first one present wins and the language code
- * is the fallback — it is what actually distinguishes one dub from another.
+ * Messages arrive from a frame that also speaks the IFrame API's own protocol, and from anything
+ * else that cares to post one, so the shape is checked before a field is read.
  */
-function audioTrackId(track: EmbedAudioTrack): string {
-  return track.id ?? track.languageCode ?? track.displayName ?? '';
-}
-
-/**
- * The player's audio tracks, normalised, or an empty list when this build reports none.
- *
- * A lone track is reported rather than suppressed: it is the only way a viewer learns what language
- * they are hearing on a video with no alternatives, and whether that is worth a menu row is the
- * caller's decision.
- */
-function readAudioTracks(
-  player: YouTubePlayerInstance | null,
-): { id: string; label: string; language: string; isDefault: boolean; raw: EmbedAudioTrack }[] {
-  try {
-    const tracks = player?.getAvailableAudioTracks?.() ?? [];
-    return tracks
-      .map((raw) => {
-        const named =
-          typeof raw.languageName === 'string' ? raw.languageName : raw.languageName?.name;
-        return {
-          id: audioTrackId(raw),
-          label: named ?? raw.displayName ?? raw.languageCode ?? '',
-          language: raw.languageCode ?? audioTrackId(raw),
-          isDefault: raw.audioIsDefault === true,
-          raw,
-        };
-      })
-      .filter((track) => track.id !== '' && track.label !== '');
-  } catch {
-    // Torn down, or a build that throws rather than returning nothing.
-    return [];
-  }
+function isBridgeAudio(data: unknown): data is BridgeAudio & { beastube: 'audio' } {
+  if (typeof data !== 'object' || data === null) return false;
+  const candidate = data as Record<string, unknown>;
+  if (candidate['beastube'] !== 'audio' || !Array.isArray(candidate['tracks'])) return false;
+  const current = candidate['current'];
+  if (current !== null && typeof current !== 'string') return false;
+  return (candidate['tracks'] as unknown[]).every((track) => {
+    if (typeof track !== 'object' || track === null) return false;
+    const fields = track as Record<string, unknown>;
+    return (
+      typeof fields['id'] === 'string' &&
+      typeof fields['name'] === 'string' &&
+      typeof fields['isDefault'] === 'boolean'
+    );
+  });
 }
 
 /**
@@ -318,21 +303,6 @@ function renderSize(
 }
 
 /** The subset of the player API this component uses. */
-/**
- * One entry from the player's own audio-track list.
- *
- * Shape is not documented, so every field is optional and read defensively. The object is handed
- * straight back to `setAudioTrack` rather than reconstructed, which is what makes not knowing its
- * shape survivable.
- */
-interface EmbedAudioTrack {
-  id?: string;
-  languageCode?: string;
-  languageName?: { name?: string } | string;
-  displayName?: string;
-  audioIsDefault?: boolean;
-}
-
 interface YouTubePlayerInstance {
   playVideo: () => void;
   pauseVideo: () => void;
@@ -376,15 +346,6 @@ interface YouTubePlayerInstance {
    * exist for the video in front of the viewer.
    */
   getAvailableQualityLevels: () => string[];
-  /**
-   * Audio tracks, on player builds that expose them.
-   *
-   * Absent from the published API reference, so both are optional: a build without them offers no
-   * audio menu rather than throwing.
-   */
-  getAvailableAudioTracks?: () => EmbedAudioTrack[];
-  setAudioTrack?: (track: EmbedAudioTrack) => void;
-  getAudioTrack?: () => EmbedAudioTrack | null;
   /** Names of the option modules the player currently has, e.g. `captions`. */
   getOptions: () => string[];
   loadModule: (module: string) => void;
@@ -634,6 +595,17 @@ export interface YouTubePlayerProps {
    */
   captionLanguage?: string;
   /**
+   * Called when the embed reports its audio tracks and the one playing.
+   *
+   * Arrives some time after playback starts — the list exists only once the media has loaded — and
+   * again after every switch, so the menu can show the track actually playing rather than the one
+   * last clicked.
+   */
+  onAudioTracks?: (
+    tracks: { id: string; label: string; isDefault: boolean }[],
+    current: string | null,
+  ) => void;
+  /**
    * The tier to ask the embed for, or `auto` to let it choose for the size it is displayed at.
    *
    * Applied by relaying the frame out, not by a command — see `renderSize`. A tier the video does
@@ -787,6 +759,7 @@ export function YouTubePlayer({
   captionsByDefault = false,
   embedCaptions = true,
   captionLanguage,
+  onAudioTracks,
   ref,
 }: YouTubePlayerProps): React.ReactNode {
   const t = useTranslation();
@@ -825,6 +798,50 @@ export function YouTubePlayer({
    * never be switched on. `onApiChange` is the documented moment the embed says a module exists.
    */
   const captionModuleRef = useRef<string | null>(null);
+
+  /**
+   * What the bridge inside the embed last reported about audio tracks.
+   *
+   * The embed keeps its track methods internal, so the shell injects a small script into its frame
+   * to reach them (`embed_bridge.js`). They are asked and answered by message, and the latest
+   * answer is kept here for the handle to read.
+   */
+  const bridgeAudioRef = useRef<BridgeAudio>({ tracks: [], current: null });
+
+  /** Posts to the bridge in the embed's frame. A frame that has not loaded has nobody to tell. */
+  const tellBridge = (message: Record<string, unknown>) => {
+    const frame = containerRef.current?.querySelector('iframe');
+    const target = frame?.contentWindow;
+    if (!frame || !target) return;
+    try {
+      target.postMessage({ beastube: 'audio', ...message }, new URL(frame.src).origin);
+    } catch {
+      // A frame mid-navigation has no usable address yet; the next state change asks again.
+    }
+  };
+
+  const reportAudio = useEffectEvent((audio: BridgeAudio) => {
+    onAudioTracks?.(
+      audio.tracks.map(({ id, name, isDefault }) => ({ id, label: name, isDefault })),
+      audio.current,
+    );
+  });
+
+  // Only this player's own frame is listened to: any frame can post a message.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const frame = containerRef.current?.querySelector('iframe');
+      if (frame?.contentWindow == null || event.source !== frame.contentWindow) return;
+      const data: unknown = event.data;
+      if (!isBridgeAudio(data)) return;
+      bridgeAudioRef.current = { tracks: data.tracks, current: data.current };
+      reportAudio(bridgeAudioRef.current);
+    };
+    window.addEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('message', onMessage);
+    };
+  }, []);
 
   /**
    * The video whose failure is on screen, readable from an effect event.
@@ -1154,6 +1171,8 @@ export function YouTubePlayer({
             // back to the size the viewer actually asked for without changing the frame rate — but
             // not instantly; see `SETTLE_DELAY_MS`.
             if (event.data === EMBED_STATE.playing) scheduleSettle();
+            // The track list exists only once the media has loaded, which playing proves.
+            if (event.data === EMBED_STATE.playing) tellBridge({ action: 'list' });
             reportState(toPlaybackState(event.data));
             // Sample immediately on transition so a pause records its exact position rather than
             // waiting up to a poll interval.
@@ -1209,6 +1228,7 @@ export function YouTubePlayer({
     // offer a caption control on a video that has none, which is worse than not offering one.
     // `onApiChange` fires again for the new video and supplies it if there is one.
     captionModuleRef.current = null;
+    bridgeAudioRef.current = { tracks: [], current: null };
     // Pointing the player somewhere else is exactly when the old failure stops applying. Without
     // this the overlay was never cleared by anything, so one transient error — a decode hiccup, a
     // network stall during load — left an opaque panel over that video for the rest of the session.
@@ -1428,8 +1448,8 @@ export function YouTubePlayer({
     swapVideo(videoId);
   }, [videoId]);
 
-  // Effect 3 — mute. No call site changes it live today; leaving it in the construction deps would
-  // make the first mute control anyone adds rebuild the player.
+  // Effect 3 — mute. The watch player changes it live; in the construction deps it would rebuild
+  // the player on every press of the mute button.
   useEffect(() => {
     applyMuted(muted);
   }, [muted]);
@@ -1667,37 +1687,17 @@ export function YouTubePlayer({
         }
       },
       audioTracks: () =>
-        readAudioTracks(playerRef.current).map(({ id, label, isDefault }) => ({
+        bridgeAudioRef.current.tracks.map(({ id, name, isDefault }) => ({
           id,
-          label,
+          label: name,
           isDefault,
         })),
-      currentAudioTrack: () => {
-        try {
-          const current = playerRef.current?.getAudioTrack?.();
-          return current ? audioTrackId(current) : null;
-        } catch {
-          return null;
-        }
-      },
+      currentAudioTrack: () => bridgeAudioRef.current.current,
       setAudioTrack: (id: string, languageCode?: string) => {
-        try {
-          const available = readAudioTracks(playerRef.current);
-          // Language is what actually identifies a dub across the two lists. The id is tried
-          // first for the case where they do happen to agree, then the tag, then the bare
-          // language — `es` should still find `es-419` when that is the only Spanish on offer.
-          const wanted = (languageCode ?? baseLanguage(id)).toLowerCase();
-          const match =
-            available.find((track) => track.id === id) ??
-            available.find((track) => track.language.toLowerCase() === wanted) ??
-            available.find((track) => baseLanguage(track.language) === baseLanguage(wanted));
-
-          // The player's own object is handed back untouched. Its shape is undocumented, so
-          // rebuilding one from an id would be guessing at a structure that can change.
-          if (match) playerRef.current?.setAudioTrack?.(match.raw);
-        } catch {
-          // As above.
-        }
+        // The id is the provider's, which is the embed's own `audioTrack.id`; the language is the
+        // bridge's fallback for a track the two sides number differently. A choice made before
+        // the media has loaded waits in the bridge for the list to exist.
+        tellBridge({ action: 'set', id, language: languageCode ?? id });
       },
       hasCaptions: () => captionModule() !== null,
       setCaptions: (enabled: boolean) => {

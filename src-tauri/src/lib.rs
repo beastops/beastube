@@ -237,6 +237,13 @@ pub fn run() {
             };
             updater.build()
         })
+        // Audio-track switching. The embed keeps its track methods to itself, so a small script
+        // inside its frame does the switching on the page's behalf; see `embed_bridge.js`.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("embed-bridge")
+                .js_init_script_on_all_frames(include_str!("embed_bridge.js"))
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             frontend_ready,
             commands::get_settings,
