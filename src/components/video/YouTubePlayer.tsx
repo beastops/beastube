@@ -609,6 +609,22 @@ export interface YouTubePlayerProps {
    */
   captionsByDefault?: boolean;
   /**
+   * Whether the embed may draw captions of its own.
+   *
+   * Off under BEASTUBE's control bar, which draws captions itself. The embed switches its caption
+   * module on for some videos without being asked — the uploader's default, or audio in a language
+   * other than the viewer's — and with both drawing, the picture carried two sets: ours where the
+   * viewer placed them, and the embed's at the bottom edge, half inside the crop.
+   */
+  embedCaptions?: boolean;
+  /**
+   * The language the embed should pick its captions in, when the viewer has stated one.
+   *
+   * Passed by the watch player for a long time and declared nowhere, so it was dropped on the
+   * floor: under YouTube's own control bar the preferred subtitle language changed nothing.
+   */
+  captionLanguage?: string;
+  /**
    * The tier to ask the embed for, or `auto` to let it choose for the size it is displayed at.
    *
    * Applied by relaying the frame out, not by a command — see `renderSize`. A tier the video does
@@ -757,6 +773,8 @@ export function YouTubePlayer({
   quality = 'auto',
   maxAutoQuality = 'auto',
   captionsByDefault = false,
+  embedCaptions = true,
+  captionLanguage,
   ref,
 }: YouTubePlayerProps): React.ReactNode {
   const t = useTranslation();
@@ -885,6 +903,9 @@ export function YouTubePlayer({
 
   /** Whether the caller wants playback to begin by itself. Read live, not captured. */
   const autoplayNow = useEffectEvent(() => autoplay);
+
+  /** Whether the embed's own captions are wanted. Read live, so switching control bars applies. */
+  const embedCaptionsNow = useEffectEvent(() => embedCaptions);
 
   /**
    * The load-time width floor for the load about to happen, or 0.
@@ -1039,6 +1060,7 @@ export function YouTubePlayer({
           // 1 forces captions on where the video has them; 3 is the embed's own "off unless the
           // viewer has asked elsewhere". Without this the setting was stored and never read.
           cc_load_policy: captionsByDefault ? 1 : 3,
+          ...(captionLanguage !== undefined ? { cc_lang_pref: captionLanguage } : {}),
           controls: controls ? 1 : 0,
           // Keyboard handling belongs to the application, not to a preview embedded in a card.
           disablekb: controls ? 0 : 1,
@@ -1086,6 +1108,10 @@ export function YouTubePlayer({
               const modules = playerRef.current?.getOptions() ?? [];
               const found = modules.find((name) => name === 'captions' || name === 'cc');
               if (found !== undefined) captionModuleRef.current = found;
+              // Loaded without being asked, while the application draws captions itself: put away
+              // before its first line is drawn, or the picture carries two sets.
+              if (found !== undefined && !embedCaptionsNow())
+                playerRef.current?.unloadModule(found);
             } catch {
               // The player throws once torn down; there is nothing to learn from it then.
             }

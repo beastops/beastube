@@ -53,14 +53,17 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 
+import { CaptionOverlay } from '@/components/video/CaptionOverlay';
+import { defaultCaptionTrack } from '@/components/video/captions';
 import { qualityLabel, YouTubePlayer, type PlayerHandle } from '@/components/video/YouTubePlayer';
-import { useAsyncResource } from '@/hooks/useAsyncResource';
 import { useTranslation } from '@/i18n/context';
-import { invoke } from '@/services/ipc';
 import { playerHandlers, usePlayerStore } from '@/stores/player';
 import { useSettingsStore } from '@/stores/settings';
-import type { CaptionTrack, Quality } from '@/types/domain';
+import type { Quality } from '@/types/domain';
 import { CHROME_IDLE_MS, EMBED_CHROME_CROP_PX } from '@/components/video/chrome';
+
+/** Space left between the top of the controls and a caption lifted clear of them. */
+const CAPTION_CLEARANCE_GAP_PX = 10;
 
 /**
  * Where the player waits when nothing wants it: off-screen, alive, and out of the way.
@@ -198,6 +201,37 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
    * every video with captions switched off, so it is not allowed to deny availability.
    */
   const [embedCaptionsFor, setEmbedCaptionsFor] = useState<string | null>(null);
+  /**
+   * The caption track picked from the menu, held against the video it was picked for.
+   *
+   * Keyed on the video so it lapses by itself: the next video offers its own list, and the
+   * language preference the pick also saved is what carries over.
+   */
+  const [chosenCaptions, setChosenCaptions] = useState<{ videoId: string; url: string } | null>(
+    null,
+  );
+  /** How tall the control bar's controls are, measured, for lifting captions clear of them. */
+  const [barHeight, setBarHeight] = useState(0);
+  const barObserver = useRef<ResizeObserver | null>(null);
+  /**
+   * Measures the control bar whenever its size changes.
+   *
+   * A callback ref rather than an effect: the bar mounts and unmounts with the control-bar setting,
+   * and this follows it without anything having to remember to re-run. What counts is the controls,
+   * not the gradient above them, so the bar's top padding is left out.
+   */
+  const measureBar = useCallback((bar: HTMLDivElement | null) => {
+    barObserver.current?.disconnect();
+    barObserver.current = null;
+    if (!bar) return;
+    const observer = new ResizeObserver(() => {
+      const padding = Number.parseFloat(getComputedStyle(bar).paddingTop) || 0;
+      setBarHeight(Math.max(0, bar.offsetHeight - padding));
+    });
+    observer.observe(bar);
+    barObserver.current = observer;
+  }, []);
+  const interfaceLanguage = useSettingsStore((state) => state.settings.appearance.language);
   const [chromeVisible, setChromeVisible] = useState(true);
   /**
    * Whether anything inside the player currently holds keyboard focus.
@@ -461,6 +495,21 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
 
   const chromeUp = chromeVisible || !playing || settingsOpen || chromeFocused;
 
+  // The track picked for this video, else the first of the viewer's languages the video has, else
+  // the video's own. The interface language stands in for an unset caption language, which is what
+  // the setting has always said it does.
+  const captionTracks = session?.captionTracks ?? [];
+  const captionTrack =
+    (chosenCaptions?.videoId === videoId
+      ? captionTracks.find((track) => track.url === chosenCaptions.url)
+      : undefined) ??
+    defaultCaptionTrack(captionTracks, [
+      captionLanguage,
+      interfaceLanguage,
+      navigator.language,
+      t.locale,
+    ]);
+
   return (
     <div
       // `aria-hidden` while parked: it is off-screen and paused, and announcing it would put a
@@ -507,7 +556,13 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
         // 12px, measured on youtube.com. Promoting the box to its own layer is what makes an
         // `<iframe>` actually respect the radius — without it the embed's square corners show
         // through.
-        className="relative size-full overflow-hidden rounded-xl bg-black"
+        //
+        // `clip`, not `hidden`. The frame overhangs the bottom edge by the crop, and an element
+        // with `overflow: hidden` is still a scroll container: bringing a control into view
+        // scrolled it by exactly that overhang, moving the picture, the captions and the controls
+        // up together and uncovering the strip of the embed's chrome the crop exists to hide.
+        // A clipped box cannot be scrolled by anything.
+        className="relative size-full overflow-clip rounded-xl bg-black"
         style={{ transform: 'translateZ(0)', isolation: 'isolate' }}
       >
         {/* Taller than the clip on both sides and shifted up by half the difference, so the embed's
@@ -534,6 +589,7 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
             // `CaptionOverlay` below so they can be positioned — and two sets on screen at once is
             // the one outcome worse than none.
             captionsByDefault={nativeControls && captionsByDefault}
+            embedCaptions={nativeControls}
             {...(captionLanguage !== null ? { captionLanguage } : {})}
             // Left on `auto` under YouTube's controls: its gear sets the embed's own preference,
             // which overrides frame size entirely, so asking by size as well would be two hands on
@@ -623,13 +679,19 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
             and below the control bar, so a caption never covers a control or sits under artwork. */}
         {!nativeControls && captionsOn && (
           <CaptionOverlay
-            tracks={session?.captionTracks ?? []}
-            preferredLanguage={captionLanguage}
+            track={captionTrack}
             positionMs={at.positionMs}
+            playing={playing}
+            rate={rate}
+            // The slot is shaped to the video, so its shape is the picture's — including in
+            // fullscreen, where the box becomes the screen and the slot does not.
+            pictureAspect={box.height > 0 ? box.width / box.height : 16 / 9}
             offsetPercent={captionOffset}
             scalePercent={captionScale}
             backgroundPercent={captionBackground}
-            raised={chromeVisible}
+            // Whenever the bar is on screen, not only while the pointer is moving: a paused video
+            // keeps its controls up, and its caption used to sit underneath them.
+            clearance={chromeUp ? barHeight + CAPTION_CLEARANCE_GAP_PX : 0}
             menuOpen={settingsOpen}
           />
         )}
@@ -674,6 +736,7 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
             />
 
             <div
+              ref={measureBar}
               className="pointer-events-none absolute inset-x-0 bottom-0 z-30 px-3 pt-8 pb-2"
               style={{
                 // A short gradient under the bar only, which is how YouTube keeps white controls
@@ -748,9 +811,9 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                     label={t.t('player.captions')}
                     active={captionsOn}
                     onClick={() => {
-                      const next = !captionsOn;
-                      setCaptionsOn(next);
-                      playerRef.current?.setCaptions(next);
+                      // The overlay draws them; the embed is not asked. Asking it switched on its
+                      // own captions as well, so the picture carried two sets.
+                      setCaptionsOn(!captionsOn);
                     }}
                   >
                     {captionsOn ? <Captions size={20} /> : <CaptionsOff size={20} />}
@@ -784,12 +847,31 @@ export function PlayerHost({ scroller }: { scroller: HTMLElement | null }): Reac
                   highFrameRate={highFrameRateFor === videoId}
                   onQuality={setQuality}
                   captionsAvailable={captionsAvailable}
-                  captionsOn={captionsOn}
-                  onCaptions={(next) => {
+                  captionTracks={captionTracks.map((track) => ({
+                    url: track.url,
+                    label:
+                      track.is_auto_generated === true
+                        ? t.t('player.captionsAutoGenerated', { language: track.language_name })
+                        : track.language_name,
+                  }))}
+                  captionTrack={captionsOn ? (captionTrack?.url ?? null) : null}
+                  onCaptions={(url) => {
                     // This menu exists only under BEASTUBE's own control bar, where captions are
                     // drawn by the overlay. The embed is not asked: under YouTube's bar its own
                     // gear owns captions, and this menu is not on screen at all.
-                    setCaptionsOn(next);
+                    setCaptionsOn(url !== null);
+                    if (url === null) return;
+                    setChosenCaptions({ videoId, url });
+                    // Remembered as the viewer's language, as the site does, so the next video
+                    // that has it opens in it.
+                    const language = captionTracks.find(
+                      (track) => track.url === url,
+                    )?.language_code;
+                    if (language !== undefined && language !== captionLanguage) {
+                      useSettingsStore
+                        .getState()
+                        .update({ playback: { caption_language: language } });
+                    }
                   }}
                 />
 
@@ -850,7 +932,8 @@ function SettingsMenu({
   highFrameRate,
   onQuality,
   captionsAvailable,
-  captionsOn,
+  captionTracks,
+  captionTrack,
   onCaptions,
 }: {
   open: boolean;
@@ -867,8 +950,12 @@ function SettingsMenu({
   highFrameRate: boolean;
   onQuality: (quality: Quality) => void;
   captionsAvailable: boolean;
-  captionsOn: boolean;
-  onCaptions: (enabled: boolean) => void;
+  /** The tracks on offer, already named for the menu. */
+  captionTracks: { url: string; label: string }[];
+  /** The track showing, or `null` while captions are off. */
+  captionTrack: string | null;
+  /** Shows a track, or turns captions off with `null`. */
+  onCaptions: (url: string | null) => void;
 }): ReactNode {
   const t = useTranslation();
 
@@ -919,7 +1006,8 @@ function SettingsMenu({
           highFrameRate={highFrameRate}
           onQuality={onQuality}
           captionsAvailable={captionsAvailable}
-          captionsOn={captionsOn}
+          captionTracks={captionTracks}
+          captionTrack={captionTrack}
           onCaptions={onCaptions}
         />
       )}
@@ -928,88 +1016,6 @@ function SettingsMenu({
 }
 
 /** Which panel of the menu is showing. */
-/**
- * Captions, drawn by the application rather than by the embed.
- *
- * The embed renders its captions inside a cross-origin iframe. Nothing outside that frame can move
- * them, resize them or restyle them — the player API exposes a font size and nothing else. Drawing
- * them here is what makes a position setting possible at all.
- *
- * The cue file is fetched through the native side: it is provider data at a provider address, and
- * the check that it *is* one lives with the provider rather than here.
- */
-function CaptionOverlay({
-  tracks,
-  preferredLanguage,
-  positionMs,
-  offsetPercent,
-  scalePercent,
-  backgroundPercent,
-  raised,
-  menuOpen,
-}: {
-  tracks: CaptionTrack[];
-  preferredLanguage: string | null;
-  positionMs: number;
-  offsetPercent: number;
-  scalePercent: number;
-  backgroundPercent: number;
-  /** Whether the control bar is showing, so captions can step over it rather than behind it. */
-  raised: boolean;
-  /** Whether the settings menu is open, which covers the right of the frame. */
-  menuOpen: boolean;
-}): ReactNode {
-  // The viewer's language if the video has it, otherwise whatever the provider listed first, which
-  // is the video's own language. A human-written track beats a machine-written one at equal rank.
-  const track =
-    tracks.find((one) => preferredLanguage !== null && one.language_code === preferredLanguage) ??
-    tracks.find((one) => one.is_auto_generated !== true) ??
-    tracks[0];
-
-  const cues = useAsyncResource(track === undefined ? null : `cues:${track.url}`, (signal) =>
-    invoke('get_caption_cues', { url: track?.url ?? '' }, { signal }),
-  );
-
-  // Linear rather than binary: a caption file is a few hundred lines and this runs on the position
-  // poll, not per frame.
-  const active = (cues.data ?? []).find(
-    (cue) => positionMs >= cue.start_ms && positionMs < cue.end_ms,
-  );
-  if (active === undefined) return null;
-
-  return (
-    <div
-      aria-live="off"
-      className="pointer-events-none absolute inset-x-0 z-20 flex justify-center"
-      style={{
-        // The control bar is about a tenth of the frame, so captions lift clear of it while it is
-        // on screen and settle back when it fades.
-        bottom: `${String(offsetPercent + (raised ? 8 : 0))}%`,
-        paddingLeft: '8%',
-        // The settings menu is opaque and sits above this, so a caption running under it was simply
-        // cut in half — the text ended at the menu's edge and read as broken rather than covered.
-        // Yielding the width it occupies makes the line wrap into what is left instead.
-        paddingRight: menuOpen ? 'min(18rem, 42%)' : '8%',
-      }}
-    >
-      <span
-        className="rounded px-2 py-1 text-center leading-snug font-medium text-white"
-        style={{
-          // Scaled to the window rather than fixed, so captions stay proportionate from a small
-          // window up to fullscreen, and clamped at both ends so neither becomes unreadable.
-          // Deliberately not a container query: nothing above sets a container context, and the
-          // unit would silently resolve to zero.
-          fontSize: `clamp(13px, calc(1.7vw * ${String(scalePercent)} / 100), 44px)`,
-          backgroundColor: `rgb(0 0 0 / ${String(backgroundPercent)}%)`,
-          textShadow: backgroundPercent < 20 ? '0 1px 3px rgb(0 0 0 / 90%)' : undefined,
-        }}
-      >
-        {active.text}
-      </span>
-    </div>
-  );
-}
-
 type Panel = 'root' | 'quality' | 'speed' | 'captions' | 'audio';
 
 /** The panel itself, mounted only while the menu is open. */
@@ -1027,7 +1033,8 @@ function SettingsPanel({
   highFrameRate,
   onQuality,
   captionsAvailable,
-  captionsOn,
+  captionTracks,
+  captionTrack,
   onCaptions,
 }: {
   close: () => void;
@@ -1043,8 +1050,12 @@ function SettingsPanel({
   highFrameRate: boolean;
   onQuality: (quality: Quality) => void;
   captionsAvailable: boolean;
-  captionsOn: boolean;
-  onCaptions: (enabled: boolean) => void;
+  /** The tracks on offer, already named for the menu. */
+  captionTracks: { url: string; label: string }[];
+  /** The track showing, or `null` while captions are off. */
+  captionTrack: string | null;
+  /** Shows a track, or turns captions off with `null`. */
+  onCaptions: (url: string | null) => void;
 }): ReactNode {
   const t = useTranslation();
   const [panel, setPanel] = useState<Panel>('root');
@@ -1088,7 +1099,11 @@ function SettingsPanel({
           {captionsAvailable && (
             <RootRow
               label={t.t('player.captions')}
-              value={t.t(captionsOn ? 'player.captionsOn' : 'player.captionsOff')}
+              // The language showing, which is the thing worth knowing about captions that are on.
+              value={
+                captionTracks.find((track) => track.url === captionTrack)?.label ??
+                t.t(captionTrack === null ? 'player.captionsOff' : 'player.captionsOn')
+              }
               onSelect={() => {
                 setPanel('captions');
               }}
@@ -1172,13 +1187,23 @@ function SettingsPanel({
             setPanel('root');
           }}
         >
-          {[false, true].map((on) => (
+          {/* Off, then every track the video has, as the site lists them. An on/off pair could
+              only ever show one language, chosen out of sight. */}
+          <OptionRow
+            label={t.t('player.captionsOff')}
+            checked={captionTrack === null}
+            onSelect={() => {
+              onCaptions(null);
+              close();
+            }}
+          />
+          {captionTracks.map((track) => (
             <OptionRow
-              key={String(on)}
-              label={t.t(on ? 'player.captionsOn' : 'player.captionsOff')}
-              checked={on === captionsOn}
+              key={track.url}
+              label={track.label}
+              checked={track.url === captionTrack}
               onSelect={() => {
-                onCaptions(on);
+                onCaptions(track.url);
                 close();
               }}
             />

@@ -526,9 +526,18 @@ pub(crate) fn caption_tracks(subtitles: Vec<rustypipe::model::Subtitle>) -> Vec<
 /// Parses a `json3` caption payload into cues.
 ///
 /// The format is a flat `events` array: a start, a duration, and the line split into segments that
-/// are simply concatenated. Events with no text are the format's own timing padding and are
-/// dropped, as are ones whose text is only whitespace — both would otherwise flash an empty
-/// caption box on screen.
+/// are concatenated. Events with no text are the format's own timing padding and are dropped, as
+/// are ones whose text is only whitespace — both would otherwise flash an empty caption box on
+/// screen.
+///
+/// Auto-generated tracks time every word: each segment after the first carries a `tOffsetMs`, and
+/// consecutive lines overlap, because the site rolls them — the previous line stays up while the
+/// next one is spoken beneath it. Read as one cue per event, the whole line appeared at once,
+/// seconds ahead of the speech, and a drawer that showed one cue at a time held each new line back
+/// until the previous one ended: measured on a music video, 43 of 52 lines overlapped their
+/// neighbour, so nearly every line arrived late. Each word-timed event therefore becomes a run of
+/// cues that grow a word at a time, and overlapping cues are left overlapping for the drawer to
+/// stack.
 pub(crate) fn cues_from_json3(json: &str) -> Vec<Cue> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
@@ -537,33 +546,90 @@ pub(crate) fn cues_from_json3(json: &str) -> Vec<Cue> {
         return Vec::new();
     };
 
-    events
-        .iter()
-        .filter_map(|event| {
-            let start = event.get("tStartMs")?.as_u64()?;
-            let text: String = event
-                .get("segs")?
-                .as_array()?
+    let mut cues: Vec<Cue> = events.iter().flat_map(event_cues).collect();
+    // Stable, so the pieces of one line keep their order; lines already arrive in time order, but
+    // the drawer relies on it rather than hoping.
+    cues.sort_by_key(|cue| cue.start_ms);
+    cues
+}
+
+/// The cues one `json3` event contributes: none, one, or one per word.
+fn event_cues(event: &serde_json::Value) -> Vec<Cue> {
+    let Some(start) = event.get("tStartMs").and_then(serde_json::Value::as_u64) else {
+        return Vec::new();
+    };
+    let segments: Vec<(u64, &str)> = event
+        .get("segs")
+        .and_then(serde_json::Value::as_array)
+        .map(|segments| {
+            segments
                 .iter()
-                .filter_map(|segment| segment.get("utf8").and_then(serde_json::Value::as_str))
-                .collect();
-            if text.trim().is_empty() {
-                return None;
-            }
-            // A missing duration means "until the next one"; a short floor keeps such a line on
-            // screen long enough to be read rather than blinking out on the same frame.
-            let duration = event
-                .get("dDurationMs")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(MIN_CUE_MS)
-                .max(MIN_CUE_MS);
-            Some(Cue {
-                start_ms: start,
-                end_ms: start + duration,
-                text,
-            })
+                .filter_map(|segment| {
+                    let text = segment.get("utf8")?.as_str()?;
+                    let offset = segment
+                        .get("tOffsetMs")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    Some((offset, text))
+                })
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+    if segments.iter().all(|(_, text)| text.trim().is_empty()) {
+        return Vec::new();
+    }
+
+    // A missing duration means "until the next one"; a short floor keeps such a line on screen long
+    // enough to be read rather than blinking out on the same frame.
+    let end = start
+        + event
+            .get("dDurationMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(MIN_CUE_MS)
+            .max(MIN_CUE_MS);
+
+    if segments.iter().all(|(offset, _)| *offset == 0) {
+        return vec![Cue {
+            start_ms: start,
+            end_ms: end,
+            text: segments.iter().map(|(_, text)| *text).collect(),
+        }];
+    }
+
+    // Word-timed. Each word appears at its own offset and the line so far stays up with it.
+    let mut cues: Vec<Cue> = Vec::with_capacity(segments.len());
+    let mut text = String::new();
+    for (index, (offset, word)) in segments.iter().enumerate() {
+        text.push_str(word);
+        let from = start + offset;
+        if from >= end {
+            // Timed past the end of its own line: shown with the words before it rather than never.
+            if let Some(last) = cues.last_mut() {
+                last.text.clone_from(&text);
+            }
+            continue;
+        }
+        let until = segments
+            .get(index + 1)
+            .map_or(end, |(next, _)| (start + next).min(end));
+        // A word sharing its offset with the next one simply arrives with it.
+        if until <= from || text.trim().is_empty() {
+            continue;
+        }
+        cues.push(Cue {
+            start_ms: from,
+            end_ms: until,
+            text: text.clone(),
+        });
+    }
+    if cues.is_empty() {
+        cues.push(Cue {
+            start_ms: start,
+            end_ms: end,
+            text,
+        });
+    }
+    cues
 }
 
 /// Shortest time a line stays on screen, in milliseconds.
@@ -784,6 +850,96 @@ mod tests {
     fn an_unreadable_payload_yields_no_cues_rather_than_failing() {
         assert!(cues_from_json3("not json").is_empty());
         assert!(cues_from_json3("{}").is_empty());
+    }
+
+    /// The opening of a real auto-generated track (`dQw4w9WgXcQ`, English, `kind=asr`), trimmed
+    /// to the fields the parser reads.
+    fn rolling_track() -> String {
+        serde_json::json!({ "events": [
+            { "tStartMs": 0, "dDurationMs": 211_879, "id": 1, "wpWinPosId": 1, "wsWinStyleId": 1 },
+            { "tStartMs": 320, "dDurationMs": 14_260, "wWinId": 1, "segs": [{ "utf8": "[Music]" }] },
+            { "tStartMs": 18_790, "wWinId": 1, "aAppend": 1, "segs": [{ "utf8": "\n" }] },
+            { "tStartMs": 18_800, "dDurationMs": 7160, "wWinId": 1, "segs": [
+                { "utf8": "We're" }, { "utf8": " no", "tOffsetMs": 239 },
+                { "utf8": " strangers", "tOffsetMs": 559 }, { "utf8": " to", "tOffsetMs": 1040 },
+            ]},
+            { "tStartMs": 21_790, "dDurationMs": 4170, "wWinId": 1, "aAppend": 1,
+              "segs": [{ "utf8": "\n" }] },
+            { "tStartMs": 21_800, "dDurationMs": 7319, "wWinId": 1, "segs": [
+                { "utf8": "love." }, { "utf8": " You", "tOffsetMs": 1000 },
+                { "utf8": " know", "tOffsetMs": 1239 }, { "utf8": " the", "tOffsetMs": 1479 },
+            ]},
+        ]})
+        .to_string()
+    }
+
+    /// The cues showing at `at`, in the order the drawer stacks them.
+    fn showing(cues: &[Cue], at: u64) -> Vec<&str> {
+        cues.iter()
+            .filter(|cue| cue.start_ms <= at && at < cue.end_ms)
+            .map(|cue| cue.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_word_timed_line_appears_a_word_at_a_time() {
+        let cues = cues_from_json3(&rolling_track());
+
+        assert_eq!(showing(&cues, 18_799), Vec::<&str>::new(), "nothing before it is spoken");
+        assert_eq!(showing(&cues, 18_800), ["We're"]);
+        assert_eq!(showing(&cues, 19_100), ["We're no"]);
+        assert_eq!(showing(&cues, 19_400), ["We're no strangers"]);
+        assert_eq!(
+            showing(&cues, 19_840),
+            ["We're no strangers to"],
+            "the last word arrives at its own offset"
+        );
+    }
+
+    #[test]
+    fn a_rolling_line_stays_up_while_the_next_is_spoken_beneath_it() {
+        let cues = cues_from_json3(&rolling_track());
+
+        // The site keeps the previous line on screen and adds the next under it. One cue at a time
+        // held "love." back until 25 960, four seconds after it was sung.
+        assert_eq!(showing(&cues, 21_800), ["We're no strangers to", "love."]);
+        assert_eq!(showing(&cues, 23_100), ["We're no strangers to", "love. You know"]);
+        assert_eq!(showing(&cues, 26_000), ["love. You know the"], "and then rolls off");
+    }
+
+    #[test]
+    fn the_appended_line_breaks_are_not_captions() {
+        let cues = cues_from_json3(&rolling_track());
+        assert!(cues.iter().all(|cue| !cue.text.trim().is_empty()));
+        assert!(cues.windows(2).all(|pair| pair[0].start_ms <= pair[1].start_ms));
+    }
+
+    #[test]
+    fn a_word_timed_past_its_line_is_shown_with_the_words_before_it() {
+        let json = serde_json::json!({ "events": [
+            { "tStartMs": 1000, "dDurationMs": 1000, "segs": [
+                { "utf8": "one" }, { "utf8": " two", "tOffsetMs": 400 },
+                { "utf8": " late", "tOffsetMs": 5000 },
+            ]},
+        ]})
+        .to_string();
+        let cues = cues_from_json3(&json);
+        assert_eq!(showing(&cues, 1500), ["one two late"]);
+        assert_eq!(cues.last().map(|cue| cue.end_ms), Some(2000));
+    }
+
+    #[test]
+    fn words_sharing_an_offset_arrive_together() {
+        let json = serde_json::json!({ "events": [
+            { "tStartMs": 0, "dDurationMs": 2000, "segs": [
+                { "utf8": "a" }, { "utf8": " b", "tOffsetMs": 500 }, { "utf8": " c", "tOffsetMs": 500 },
+            ]},
+        ]})
+        .to_string();
+        let cues = cues_from_json3(&json);
+        assert_eq!(showing(&cues, 100), ["a"]);
+        assert_eq!(showing(&cues, 600), ["a b c"]);
+        assert_eq!(cues.len(), 2);
     }
 
     #[test]
